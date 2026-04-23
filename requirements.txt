@@ -1,0 +1,16 @@
+langgraph
+langchain
+langchain-openai
+langchain-xai
+langchain-aws[anthropic]
+langchain-ollama
+langgraph-cli[inmem]
+python-dotenv
+ipython
+sqlalchemy
+azure-identity
+psycopg2-binary
+streamlit
+matplotlib
+plotly
+kaleido
