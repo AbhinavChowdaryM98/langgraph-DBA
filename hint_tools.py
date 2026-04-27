@@ -6,22 +6,24 @@ from hint_manager import hint_manager
 from db_connector.factory import DBType
 from common_config import db_connector
 
-def _add_hint_internal(content: str, sql_query: str, schema_context: str = "") -> Dict[str, Any]:
+def _add_hint_internal(content: str, sql_query: str, schema_context: str = "", connection_id: str = None) -> Dict[str, Any]:
     """
     Internal function to add a hint (non-decorated, can be called directly).
-    
+
     Args:
         content: The user's question or query description
         sql_query: The successful SQL query that was executed
         schema_context: Optional context about the schema/tables involved
-    
+        connection_id: Optional connection ID. If not provided, uses the current database connection ID.
+
     Returns:
         Dictionary with result status and message
     """
     try:
-        # Get current connection ID
-        connection_id = db_connector.get_connection_id()
-        
+        # Use provided connection_id or get current one
+        if connection_id is None:
+            connection_id = db_connector.get_connection_id()
+
         # Add hint to vector store
         success = hint_manager.add_hint(
             connection_id=connection_id,
@@ -29,7 +31,7 @@ def _add_hint_internal(content: str, sql_query: str, schema_context: str = "") -
             sql_query=sql_query,
             schema_context=schema_context
         )
-        
+
         if success:
             return {
                 "status": "success",
@@ -49,54 +51,57 @@ def _add_hint_internal(content: str, sql_query: str, schema_context: str = "") -
         }
 
 @tool
-def add_hint(content: str, sql_query: str, schema_context: str = "") -> str:
+def add_hint(content: str, sql_query: str, schema_context: str = "", connection_id: str = None) -> str:
     """
     Add a successful SQL pattern as a hint for future reference.
-    
+
     Use this tool when:
     - A SQL query executes successfully and provides useful results
     - The query represents a common pattern that might be useful for similar questions
     - You want to help the system learn from successful interactions
-    
+
     Args:
         content: The user's question or query description
         sql_query: The successful SQL query that was executed
         schema_context: Optional context about the schema/tables involved
-    
+        connection_id: Optional connection ID. If not provided, uses the current database connection ID.
+
     Returns:
         JSON string with success status and message
     """
-    result = _add_hint_internal(content, sql_query, schema_context)
+    result = _add_hint_internal(content, sql_query, schema_context, connection_id)
     return json.dumps(result, indent=2)
 
 @tool
-def get_hints(query: str, limit: int = 5) -> str:
+def get_hints(query: str, limit: int = 5, connection_id: str = None) -> str:
     """
     Retrieve relevant SQL hints based on the current query and database connection.
-    
+
     Use this tool when:
     - You want to understand common SQL patterns for this database
     - You need context about how similar questions have been answered before
     - You want to learn from previous successful queries for this connection
-    
+
     Args:
         query: The user's question or query description
         limit: Maximum number of hints to retrieve (default: 5)
-    
+        connection_id: Optional connection ID. If not provided, uses the current database connection ID.
+
     Returns:
         JSON string with relevant hints and their metadata
     """
     try:
-        # Get current connection ID
-        connection_id = db_connector.get_connection_id()
-        
+        # Use provided connection_id or get current one
+        if connection_id is None:
+            connection_id = db_connector.get_connection_id()
+
         # Retrieve relevant hints
         hints = hint_manager.get_hints(
             connection_id=connection_id,
             query=query,
             limit=limit
         )
-        
+
         if hints:
             result = {
                 "status": "success",
@@ -112,9 +117,9 @@ def get_hints(query: str, limit: int = 5) -> str:
                 "message": "No relevant hints found for this query and connection",
                 "hints": []
             }
-        
+
         return json.dumps(result, indent=2)
-        
+
     except Exception as e:
         logging.error(f"Error in get_hints tool: {e}")
         return json.dumps({
@@ -209,23 +214,24 @@ def clear_connection_hints() -> str:
         }, indent=2)
 
 @tool
-def add_hint_simple(query: str, sql_query: str, execution_success: bool = True, 
-                   schema_context: str = "") -> str:
+def add_hint_simple(query: str, sql_query: str, execution_success: bool = True,
+                   schema_context: str = "", connection_id: str = None) -> str:
     """
     Simply add a hint without complex logic.
-    
+
     Use this tool when you've successfully solved a query and want to store the pattern.
     The orchestrator should decide when to call this based on:
     - Whether existing hints were helpful
     - How much extra effort was required
     - Complexity of the solution
-    
+
     Args:
         query: The user's question or query description
         sql_query: The SQL query that was executed
         execution_success: Whether query executed successfully
         schema_context: Optional context about schema/tables involved
-    
+        connection_id: Optional connection ID. If not provided, uses the current database connection ID.
+
     Returns:
         JSON string with addition result
     """
@@ -236,19 +242,19 @@ def add_hint_simple(query: str, sql_query: str, execution_success: bool = True,
                 "status": "skipped",
                 "message": "Query execution failed - no hint added"
             }, indent=2)
-        
+
         # Add hint using internal function
-        add_result = _add_hint_internal(query, sql_query, schema_context)
-        
+        add_result = _add_hint_internal(query, sql_query, schema_context, connection_id)
+
         result = {
             "status": "success",
             "action": "added",
             "message": "New hint added successfully",
             "add_result": add_result
         }
-        
+
         return json.dumps(result, indent=2)
-        
+
     except Exception as e:
         logging.error(f"Error in add_hint_simple tool: {e}")
         return json.dumps({

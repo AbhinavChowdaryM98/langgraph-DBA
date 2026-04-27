@@ -11,6 +11,7 @@ import operator
 from langgraph.graph import StateGraph, START, END
 from typing import Literal
 import os
+import json
 
 # Agent setup
 class MessagesState(TypedDict):
@@ -46,16 +47,16 @@ def model_init(provider: str = "Ollama"):
     return model
 
 def llm_call(state: dict, model_with_tools):
-    """LLM decides whether to call a tool or not."""
+    """LLM decides whether to call a tool or not"""
     return {
         "messages": [
             model_with_tools.invoke(
                 [
                     SystemMessage(
-                        content=f"""You are a helpful database assistant. 
-                        
+                        content=f"""You are a helpful database assistant.
+
                         For simple greetings and conversation, respond naturally without using any tools.
-                        
+
                         For database questions (anything involving data, queries, tables, analysis):
                         - FIRST get hints using get_hints to learn from previous successful patterns for this connection
                         - If hints are helpful, use them to generate SQL quickly
@@ -63,15 +64,16 @@ def llm_call(state: dict, model_with_tools):
                         - Then use query_db to answer their specific question with appropriate SQL
                         - You're connected to a datasource with query generation instructions: {db_connector.get_query_generation_instructions()}
                         - If you're struggling to generate a query, use the query execution tool to get 5 sample rows of data to understand the schema and data better
-                        
+
                         HINT SYSTEM USAGE:
                         - Use get_hints(query) at the start to see relevant patterns
+                        - When calling get_hints or add_hint_simple, you may optionally pass connection_id if you have a specific connection context
                         - After successfully solving a complex query, you may use add_hint_simple to store the pattern
                         - Only add hints when the solution required significant effort or the hints were not helpful
                         - IMPORTANT: After using add_hint_simple, you MUST continue to provide your final answer to the user
                         - Hint tools are optional side operations - they do NOT replace your final response
                         - ALWAYS provide a clear, natural language answer to the user's original question
-                        
+
                         IMPORTANT for python_code_execution tool:
                         - Use this tool ONLY ONCE per visualization request
                         - If the code fails, DO NOT retry with different approaches - instead explain the error to the user
@@ -150,33 +152,44 @@ def create_agent(provider: str = "XAI", use_qdrant_hints: bool = True):
     # Compile the agent
     return agent_builder.compile()
 
-def llm_call_sql_only(state: dict, model_with_tools):
-    """LLM generates SQL queries without execution."""
+def llm_call_sql_only(state: dict, model_with_tools, use_qdrant_hints: bool = True, connection_id: str = None):
+    """LLM generates SQL queries without execution"""
+    # Build system message based on hint availability
+    if use_qdrant_hints:
+        connection_context = f"\n                        - Current connection ID: {connection_id}" if connection_id else ""
+        hint_instructions = f"""
+                        - FIRST get hints using get_hints to learn from previous successful patterns for this connection{connection_context}
+                        - If hints are helpful, use them to generate SQL quickly
+                        - If hints are not relevant, get schema context using get_schemas_with_tables to understand available tables and structure
+
+                        HINT SYSTEM USAGE:
+                        - Use get_hints(query, connection_id="{connection_id}") at the start to see relevant patterns for this specific connection
+                        - After successfully generating a complex query, you may use add_hint_simple(query, sql_query, connection_id="{connection_id}") to store the pattern
+                        - Only add hints when the solution required significant effort or the hints were not helpful
+                        - IMPORTANT: After using add_hint_simple, you MUST continue to provide your final SQL query
+                        - Hint tools are optional side operations - they do NOT replace your final response
+
+                        Available tools: get_schemas_with_tables, get_create_table_statements, get_hints, add_hint_simple"""
+    else:
+        hint_instructions = """
+                        - FIRST get schema context using get_schemas_with_tables to understand available tables and structure
+
+                        Available tools: get_schemas_with_tables, get_create_table_statements"""
+
     return {
         "messages": [
             model_with_tools.invoke(
                 [
                     SystemMessage(
                         content=f"""You are a SQL query generator. Your ONLY job is to generate SQL queries based on user questions.
-                        
-                        For database questions:
-                        - FIRST get hints using get_hints to learn from previous successful patterns for this connection
-                        - If hints are helpful, use them to generate SQL quickly
-                        - If hints are not relevant, get schema context using get_schemas_with_tables to understand available tables and structure
+
+                        For database questions:{hint_instructions}
                         - Then generate ONLY the SQL query - no explanations, no formatting, no markdown
                         - Return the raw SQL query as your final response
                         - Do NOT include ```sql or any other formatting
                         - Do NOT execute queries or provide results
                         - You're connected to a datasource with query generation instructions: {db_connector.get_query_generation_instructions()}
-                        
-                        HINT SYSTEM USAGE:
-                        - Use get_hints(query) at the start to see relevant patterns
-                        - After successfully generating a complex query, you may use add_hint_simple to store the pattern
-                        - Only add hints when the solution required significant effort or the hints were not helpful
-                        - IMPORTANT: After using add_hint_simple, you MUST continue to provide your final SQL query
-                        - Hint tools are optional side operations - they do NOT replace your final response
-                        
-                        Available tools: get_schemas_with_tables, get_create_table_statements, get_hints, add_hint_simple
+
                         Do NOT use query_db or python_code_execution tools."""
                     )
                 ]
@@ -187,15 +200,15 @@ def llm_call_sql_only(state: dict, model_with_tools):
         "hit_limit": state.get('hit_limit', False)
     }
 
-def create_sql_only_agent(provider: str = "XAI", use_qdrant_hints: bool = True):
+def create_sql_only_agent(provider: str = "XAI", use_qdrant_hints: bool = True, connection_id: str = None):
     """Create and compile the SQL-only agent."""
     model = model_init(provider)
-    
+
     # Create SQLite-specific tools
     from db_connector.factory import DBType
     from db_connector.sqlite_connector import SQLiteConnector
     sqlite_connector = SQLiteConnector()
-    
+
     # Create SQLite-specific tool functions
     @tool
     def sqlite_get_schemas_with_tables() -> str:
@@ -205,28 +218,28 @@ def create_sql_only_agent(provider: str = "XAI", use_qdrant_hints: bool = True):
             return json.dumps({"error": "Failed to get schemas with tables"})
         return json.dumps(schemas_with_tables, default=str)
 
-    @tool  
+    @tool
     def sqlite_get_create_table_statements(table_name: str | list[str]) -> str:
         """Get the CREATE TABLE statement for a given table in SQLite."""
         create_table_statement = sqlite_connector.get_create_table_statements(table_name)
         if not create_table_statement:
             return json.dumps({"error": "Failed to get create table statement"})
         return json.dumps({"create_table_statement": create_table_statement}, default=str)
-    
+
     # Build base tools list
     tools = [sqlite_get_schemas_with_tables, sqlite_get_create_table_statements]
-    
+
     # Conditionally add hint tools based on flag
     if use_qdrant_hints:
         from hint_tools import get_hints, add_hint_simple
         tools.extend([get_hints, add_hint_simple])
-    
+
     tools_by_name = {tool.name: tool for tool in tools}
     model_with_tools = model.bind_tools(tools)
 
     # Build workflow
     agent_builder = StateGraph(MessagesState)
-    agent_builder.add_node("llm_call", lambda state: llm_call_sql_only(state, model_with_tools))
+    agent_builder.add_node("llm_call", lambda state: llm_call_sql_only(state, model_with_tools, use_qdrant_hints, connection_id))
     agent_builder.add_node("tool_node", lambda state: tool_node(state, tools_by_name))
 
     # Add edges to connect nodes
