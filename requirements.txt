@@ -14,3 +14,6 @@ streamlit
 matplotlib
 plotly
 kaleido
+fastapi
+uvicorn
+sqlite3

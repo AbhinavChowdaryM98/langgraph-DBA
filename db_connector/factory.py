@@ -1,10 +1,12 @@
 from enum import Enum
 from .pg_connector import PostgreConnector
 from .semantic_model_connector import SemanticModelConnector
+from .sqlite_connector import SQLiteConnector
 
 class DBType(Enum):
     POSTGRES = "Postgres"
     SEMANTIC_MODEL = "Semantic Model"
+    SQLITE = "SQLite"
 
 
 def get_db_connector(connector_type: str | DBType):
@@ -22,6 +24,8 @@ def get_db_connector(connector_type: str | DBType):
         return PostgreConnector()
     elif connector_type == DBType.SEMANTIC_MODEL:
         return SemanticModelConnector()
+    elif connector_type == DBType.SQLITE:
+        return SQLiteConnector()
     else:
         raise ValueError(f"Unknown DB connector type: {connector_type}")
 

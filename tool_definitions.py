@@ -23,23 +23,30 @@ def query_db(query: str) -> str:
 
 @tool
 def get_schemas_with_tables() -> str:
-    """Get all schemas with their tables.
-
+    """Get all schemas with their table names. This tool takes NO parameters and returns ALL schemas and tables.
+    
+    Use when:
+    - User asks any database question involving data, tables, or analysis
+    - User explicitly asks "what tables/tables/schemas do you have?"
+    - User asks to explore the database structure
+    - You need context to generate accurate SQL queries
+    
     Returns:
-        JSON string with schemas and tables
+        JSON string with schemas and table names (only)
     """
     schemas_with_tables = db_connector.get_schemas_with_tables()
+    # print("schemas_with_tables", schemas_with_tables)
     if not schemas_with_tables:
         return json.dumps({"error": "Failed to get schemas with tables"})
     return json.dumps(schemas_with_tables, default=str)
 
 
 @tool
-def get_create_table_statements(table_name: str) -> str:
+def get_create_table_statements(table_name: str | list[str]) -> str:
     """Get the CREATE TABLE statement for a given table.
 
     Args:
-        table_name: Name of the table
+        table_name: Name of the table as string or list of table names as list of strings
     """
     create_table_statement = db_connector.get_create_table_statements(table_name)
     if not create_table_statement:

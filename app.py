@@ -1,16 +1,60 @@
-from langchain.chat_models import init_chat_model
-from dotenv import load_dotenv
-import streamlit as st
-import os
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import List, Dict, Any, Optional
 import time
 import json
+from dotenv import load_dotenv
+import os
 
 load_dotenv()
+
+from langchain.chat_models import init_chat_model
+from langchain.tools import tool
 from tool_definitions import query_db, get_schemas_with_tables, get_create_table_statements, db_connector, python_code_execution
+from langchain.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage, AnyMessage
+from typing_extensions import TypedDict, Annotated
+import operator
+from langgraph.graph import StateGraph, START, END
+from typing import Literal
 
-# 2026-04-22 16:52:38.791 Please replace `st.components.v1.html` with `st.iframe`. `st.components.v1.html` will be removed after 2026-06-01.
+app = FastAPI(title="Database Query Assistant API")
 
+# Request/Response models
+class QueryRequest(BaseModel):
+    query: str
+    provider: str = "XAI"
+    conversation_history: Optional[List[Dict[str, str]]] = []
 
+class ToolExecution(BaseModel):
+    tool_name: str
+    tool_response: str
+    tool_execution_time: float
+
+class TokenUsage(BaseModel):
+    input_tokens: int
+    output_tokens: int
+    provider: str
+    model_name: str
+
+class QueryResponse(BaseModel):
+    response: str
+    tools: List[ToolExecution]
+    response_time: float
+    token_usage: TokenUsage
+
+class SQLQueryRequest(BaseModel):
+    query: str
+    provider: str = "XAI"
+    conversation_history: Optional[List[Dict[str, str]]] = []
+    db_id: Optional[str] = None  # Optional custom SQLite database ID
+
+class SQLQueryResponse(BaseModel):
+    sql_query: str
+    tools: List[ToolExecution]
+    response_time: float
+    token_usage: TokenUsage
+
+# Model initialization (same as streamlit-app)
 def model_init(provider: str = "Ollama"):
     if provider == "Azure":
         model = init_chat_model(
@@ -37,40 +81,28 @@ def model_init(provider: str = "Ollama"):
         raise ValueError(f"Invalid provider: {provider}")
     return model
 
-model = model_init()
-
-
-# Augment the LLM with tools
-tools = [query_db, get_schemas_with_tables, get_create_table_statements, python_code_execution]
-tools_by_name = {tool.name: tool for tool in tools}
-model_with_tools = model.bind_tools(tools)
-
-
-from langchain.messages import AnyMessage
-from typing_extensions import TypedDict, Annotated
-import operator
-
-
+# Agent setup (same as streamlit-app)
 class MessagesState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
     llm_calls: int
     hit_limit: bool
 
-
-from langchain.messages import SystemMessage
-
-
-def llm_call(state: dict):
+def llm_call(state: dict, model_with_tools):
     """LLM decides whether to call a tool or not"""
-
     return {
         "messages": [
             model_with_tools.invoke(
                 [
                     SystemMessage(
-                        content=f"""You are a helpful assistant tasked with performing arithmetic on a set of inputs.
-                        You're connected to a datasource with query generation instructions: {db_connector.get_query_generation_instructions()}
-                        If you're struggling to generate query, use the query execution tool to get 5 sample rows of data to understand the schema and data better.
+                        content=f"""You are a helpful database assistant. 
+                        
+                        For simple greetings and conversation, respond naturally without using any tools.
+                        
+                        For database questions (anything involving data, queries, tables, analysis):
+                        - FIRST get schema context using get_schemas_with_tables to understand available tables and structure
+                        - Then use query_db to answer their specific question with appropriate SQL
+                        - You're connected to a datasource with query generation instructions: {db_connector.get_query_generation_instructions()}
+                        - If you're struggling to generate a query, use the query execution tool to get 5 sample rows of data to understand the schema and data better
                         
                         IMPORTANT for python_code_execution tool:
                         - Use this tool ONLY ONCE per visualization request
@@ -90,12 +122,8 @@ def llm_call(state: dict):
         "hit_limit": state.get('hit_limit', False)
     }
 
-from langchain.messages import ToolMessage
-
-
-def tool_node(state: dict):
+def tool_node(state: dict, tools_by_name):
     """Performs the tool call"""
-
     result = []
     for tool_call in state["messages"][-1].tool_calls:
         tool = tools_by_name[tool_call["name"]]
@@ -103,21 +131,14 @@ def tool_node(state: dict):
         result.append(ToolMessage(content=observation, tool_call_id=tool_call["id"]))
     return {"messages": result}
 
-
-from typing import Literal
-from langgraph.graph import StateGraph, START, END
-
-
 def should_continue(state: MessagesState) -> Literal["tool_node", END]:
-    """Decide if we should continue the loop or stop based upon whether the LLM made enough tool calls and gathered responses for the user question"""
-
+    """Decide if we should continue the loop or stop"""
     messages = state["messages"]
     last_message = messages[-1]
     llm_calls = state.get('llm_calls', 0)
 
     # Stop if we've made too many calls (prevent infinite loops)
     if llm_calls >= 10:
-        # Add a flag to indicate we hit the limit
         state["hit_limit"] = True
         return END
 
@@ -128,235 +149,329 @@ def should_continue(state: MessagesState) -> Literal["tool_node", END]:
     # Otherwise, we stop (reply to the user)
     return END
 
+def create_agent(provider: str = "XAI"):
+    """Create and compile the agent"""
+    model = model_init(provider)
+    tools = [query_db, get_schemas_with_tables, get_create_table_statements, python_code_execution]
+    tools_by_name = {tool.name: tool for tool in tools}
+    model_with_tools = model.bind_tools(tools)
 
+    # Build workflow
+    agent_builder = StateGraph(MessagesState)
+    agent_builder.add_node("llm_call", lambda state: llm_call(state, model_with_tools))
+    agent_builder.add_node("tool_node", lambda state: tool_node(state, tools_by_name))
 
-# Build workflow
-agent_builder = StateGraph(MessagesState)
+    # Add edges to connect nodes
+    agent_builder.add_edge(START, "llm_call")
+    agent_builder.add_conditional_edges(
+        "llm_call",
+        should_continue,
+        ["tool_node", END]
+    )
+    agent_builder.add_edge("tool_node", "llm_call")
 
-# Add nodes
-agent_builder.add_node("llm_call", llm_call)
-agent_builder.add_node("tool_node", tool_node)
+    # Compile the agent
+    return agent_builder.compile()
 
-# Add edges to connect nodes
-agent_builder.add_edge(START, "llm_call")
-agent_builder.add_conditional_edges(
-    "llm_call",
-    should_continue,
-    ["tool_node", END]
-)
-agent_builder.add_edge("tool_node", "llm_call")
+def llm_call_sql_only(state: dict, model_with_tools):
+    """LLM generates SQL queries without execution"""
+    return {
+        "messages": [
+            model_with_tools.invoke(
+                [
+                    SystemMessage(
+                        content=f"""You are a SQL query generator. Your ONLY job is to generate SQL queries based on user questions.
+                        
+                        For database questions:
+                        - FIRST get schema context using get_schemas_with_tables to understand available tables and structure
+                        - Then generate ONLY the SQL query - no explanations, no formatting, no markdown
+                        - Return the raw SQL query as your final response
+                        - Do NOT include ```sql or any other formatting
+                        - Do NOT execute queries or provide results
+                        - You're connected to a datasource with query generation instructions: {db_connector.get_query_generation_instructions()}
+                        
+                        Available tools: get_schemas_with_tables, get_create_table_statements
+                        Do NOT use query_db or python_code_execution tools."""
+                    )
+                ]
+                + state["messages"]
+            )
+        ],
+        "llm_calls": state.get('llm_calls', 0) + 1,
+        "hit_limit": state.get('hit_limit', False)
+    }
 
-# Compile the agent
-agent = agent_builder.compile()
+def create_sql_only_agent(provider: str = "XAI"):
+    """Create and compile the SQL-only agent"""
+    model = model_init(provider)
+    
+    # Create SQLite-specific tools
+    from db_connector.factory import DBType
+    from db_connector.sqlite_connector import SQLiteConnector
+    sqlite_connector = SQLiteConnector()
+    
+    # Create SQLite-specific tool functions
+    @tool
+    def sqlite_get_schemas_with_tables() -> str:
+        """Get all schemas with their table names for SQLite."""
+        schemas_with_tables = sqlite_connector.get_schemas_with_tables()
+        if not schemas_with_tables:
+            return json.dumps({"error": "Failed to get schemas with tables"})
+        return json.dumps(schemas_with_tables, default=str)
 
+    @tool  
+    def sqlite_get_create_table_statements(table_name: str | list[str]) -> str:
+        """Get the CREATE TABLE statement for a given table in SQLite."""
+        create_table_statement = sqlite_connector.get_create_table_statements(table_name)
+        if not create_table_statement:
+            return json.dumps({"error": "Failed to get create table statement"})
+        return json.dumps({"create_table_statement": create_table_statement}, default=str)
+    
+    tools = [sqlite_get_schemas_with_tables, sqlite_get_create_table_statements]
+    tools_by_name = {tool.name: tool for tool in tools}
+    model_with_tools = model.bind_tools(tools)
 
+    # Build workflow
+    agent_builder = StateGraph(MessagesState)
+    agent_builder.add_node("llm_call", lambda state: llm_call_sql_only(state, model_with_tools))
+    agent_builder.add_node("tool_node", lambda state: tool_node(state, tools_by_name))
 
+    # Add edges to connect nodes
+    agent_builder.add_edge(START, "llm_call")
+    agent_builder.add_conditional_edges(
+        "llm_call",
+        should_continue,
+        ["tool_node", END]
+    )
+    agent_builder.add_edge("tool_node", "llm_call")
 
-# Streamlit Chat Interface
-st.title("Database Query Assistant")
-st.write("Ask questions about your database and I'll help you analyze the data.")
+    # Compile the agent
+    return agent_builder.compile()
 
-# Initialize chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# Display chat history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        # Display tool results (images) first
-        if message["role"] == "assistant" and "tool_results" in message and message["tool_results"]:
-            import json
-            for tool_result in message["tool_results"]:
-                try:
-                    result_dict = json.loads(tool_result)
-                    if "result" in result_dict:
-                        result_content = result_dict["result"]
-                        # Handle different formats
-                        if result_content.startswith("<html"):
-                            # Full HTML (plotly interactive graph)
-                            st.components.v1.html(result_content, height=600, scrolling=True)
-                        elif result_content.startswith("<img"):
-                            # HTML img tag (matplotlib)
-                            st.markdown(result_content, unsafe_allow_html=True)
-                        elif result_content.startswith("data:image/"):
-                            # Base64 data URI
-                            st.markdown(f'<img src="{result_content}" style="max-width: 100%; height: auto;">', unsafe_allow_html=True)
-                except json.JSONDecodeError:
-                    if tool_result.startswith("<html"):
-                        st.components.v1.html(tool_result, height=600, scrolling=True)
-                    elif tool_result.startswith("<img"):
-                        st.markdown(tool_result, unsafe_allow_html=True)
-                    elif tool_result.startswith("data:image/"):
-                        st.markdown(f'<img src="{tool_result}" style="max-width: 100%; height: auto;">', unsafe_allow_html=True)
+@app.post("/query", response_model=QueryResponse)
+async def query_database(request: QueryRequest):
+    """Process a database query and return response with tool execution details"""
+    
+    try:
+        # Create agent
+        agent = create_agent(request.provider)
         
-        st.markdown(message["content"], unsafe_allow_html=True)
-        # Show execution steps and timings for assistant messages
-        if message["role"] == "assistant":
-            # Show total duration
-            if "total_duration" in message:
-                st.caption(f"⏱️ Response time: {message['total_duration']}s")
-            # Show tool timings
-            if "tool_timings" in message and message["tool_timings"]:
-                with st.expander("View tool execution times"):
-                    for tool_name, timing in message["tool_timings"].items():
-                        if "duration" in timing:
-                            st.markdown(f"- {tool_name}: {timing['duration']}s")
-            # Show execution steps
-            if "execution_steps" in message and message["execution_steps"]:
-                with st.expander("View execution steps"):
-                    for step in message["execution_steps"]:
-                        st.markdown(step)
-
-# Chat input
-if prompt := st.chat_input("Ask a question about your database:"):
-    # Display user message
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    # Get response from agent with streaming
-    with st.chat_message("assistant"):
-        from langchain.messages import HumanMessage, AIMessage
-        
-        # Convert chat history to LangChain messages (already includes current prompt from line 147)
+        # Convert conversation history to LangChain messages
         langchain_messages = []
-        for msg in st.session_state.messages:
+        for msg in request.conversation_history:
             if msg["role"] == "user":
                 langchain_messages.append(HumanMessage(content=msg["content"]))
             elif msg["role"] == "assistant":
                 langchain_messages.append(AIMessage(content=msg["content"]))
         
-        # Create a status container for showing steps
-        with st.status("Processing...", expanded=True) as status:
-            step_count = 0
-            final_message = ""
-            execution_steps = []
-            tool_results = []
-            tool_timings = {}
-            response_start_time = time.time()
-            hit_limit = False
-            
-            for chunk in agent.stream({"messages": langchain_messages}, stream_mode="updates"):
-                for node_name, node_output in chunk.items():
-                    # Check if we hit the limit
-                    if "hit_limit" in node_output and node_output["hit_limit"]:
-                        hit_limit = True
-                        status.write("⚠️ **Reached maximum tool call limit (10)**")
-                    
-                    step_count += 1
-                    node_start_time = time.time()
-                    step_text = f"**Step {step_count}:** Executing `{node_name}`"
-                    status.write(step_text)
-                    execution_steps.append(step_text)
-                    
-                    if "messages" in node_output:
-                        for msg in node_output["messages"]:
-                            if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                                for tool_call in msg.tool_calls:
-                                    tool_text = f"  🛠️ Calling tool: `{tool_call['name']}`"
-                                    args_text = f"  📝 Args: `{tool_call['args']}`"
-                                    status.write(tool_text)
-                                    status.write(args_text)
-                                    execution_steps.append(tool_text)
-                                    execution_steps.append(args_text)
-                                    tool_timings[tool_call['name']] = {"start": node_start_time}
-                            elif hasattr(msg, 'content'):
-                                # Capture tool results (from tool_node)
-                                if node_name == "tool_node":
-                                    tool_results.append(msg.content)
-                                    node_end_time = time.time()
-                                    # Update timing for the tool that was called
-                                    for tool_name in tool_timings:
-                                        if tool_timings[tool_name].get("end") is None:
-                                            tool_timings[tool_name]["end"] = node_end_time
-                                            tool_timings[tool_name]["duration"] = round(node_end_time - tool_timings[tool_name]["start"], 2)
-                                    status.write(f"  📦 Tool result: {msg.content[:100]}...")
-                                    execution_steps.append(f"  📦 Tool result: {msg.content[:100]}...")
-                                elif msg.content and not msg.content.startswith('{'):
-                                    response_text = f"  💬 Response: `{msg.content[:100]}...`"
-                                    status.write(response_text)
-                                    execution_steps.append(response_text)
-                                    # Capture the final AI response
-                                    if node_name == "llm_call" and not msg.tool_calls:
-                                        final_message = msg.content
-            
-            response_end_time = time.time()
-            total_duration = round(response_end_time - response_start_time, 2)
-            status.write(f"⏱️ **Total response time:** {total_duration}s")
-            
-            # Display tool timings
-            if tool_timings:
-                status.write("**Tool execution times:**")
-                for tool_name, timing in tool_timings.items():
-                    if "duration" in timing:
-                        status.write(f"  - {tool_name}: {timing['duration']}s")
-            
-            status.update(label="Complete!", state="complete", expanded=False)
+        # Add current query
+        langchain_messages.append(HumanMessage(content=request.query))
         
-        # If limit was hit, generate a summary response
+        # Initialize tracking variables
+        response_start_time = time.time()
+        tool_executions = []
+        final_message = ""
+        hit_limit = False
+        input_tokens = 0
+        output_tokens = 0
+        
+        # Process the query
+        for chunk in agent.stream({"messages": langchain_messages}, stream_mode="updates"):
+            for node_name, node_output in chunk.items():
+                # Check if we hit the limit
+                if "hit_limit" in node_output and node_output["hit_limit"]:
+                    hit_limit = True
+                
+                if "messages" in node_output:
+                    for msg in node_output["messages"]:
+                        # Track tool calls
+                        if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                            for tool_call in msg.tool_calls:
+                                tool_start_time = time.time()
+                                
+                        # Track tool results
+                        elif hasattr(msg, 'content') and node_name == "tool_node":
+                            tool_end_time = time.time()
+                            # Extract tool name from previous tool call
+                            if hasattr(msg, 'tool_call_id') and msg.tool_call_id:
+                                # Find the tool name from the tool call
+                                tool_name = "unknown"
+                                for prev_msg in langchain_messages[-5:]:  # Look at recent messages
+                                    if hasattr(prev_msg, 'tool_calls'):
+                                        for tc in prev_msg.tool_calls:
+                                            if tc.get('id') == msg.tool_call_id:
+                                                tool_name = tc.get('name', 'unknown')
+                                                break
+                                
+                                tool_executions.append(ToolExecution(
+                                    tool_name=tool_name,
+                                    tool_response=msg.content,
+                                    tool_execution_time=round(tool_end_time - tool_start_time, 2)
+                                ))
+                        
+                        # Capture final response
+                        elif hasattr(msg, 'content') and node_name == "llm_call" and not msg.tool_calls:
+                            final_message = msg.content
+        
+        response_end_time = time.time()
+        total_response_time = round(response_end_time - response_start_time, 2)
+        
+        # Handle hit limit case
         if hit_limit:
             final_message = """I've reached the maximum number of tool calls (10) to prevent infinite loops. 
 
 Here's what I was able to gather so far:
 """
-            # Add tool results summary
-            if tool_results:
-                for i, tool_result in enumerate(tool_results[-3:], 1):  # Show last 3 results
-                    try:
-                        result_dict = json.loads(tool_result)
-                        if "data" in result_dict:
-                            final_message += f"\n- Query result {i}: {result_dict.get('data', 'No data')}"
-                        elif "error" in result_dict:
-                            final_message += f"\n- Query error {i}: {result_dict['error']}"
-                        elif "result" in result_dict:
-                            final_message += f"\n- Tool result {i}: {str(result_dict['result'])[:100]}..."
-                    except:
-                        final_message += f"\n- Result {i}: {tool_result[:100]}..."
-            
+            if tool_executions:
+                for i, tool_exec in enumerate(tool_executions[-3:], 1):
+                    final_message += f"\n- Tool result {i}: {tool_exec.tool_response[:100]}..."
             final_message += "\n\nPlease ask a more specific question or provide additional guidance to continue the analysis."
         
-        # Display tool results (images from python_code_execution)
-        for tool_result in tool_results:
-            try:
-                result_dict = json.loads(tool_result)
-                if "result" in result_dict:
-                    result_content = result_dict["result"]
-                    # Handle different formats
-                    if result_content.startswith("<html"):
-                        # Full HTML (plotly interactive graph)
-                        st.components.v1.html(result_content, height=600, scrolling=True)
-                    elif result_content.startswith("<img"):
-                        # Already an HTML img tag (matplotlib)
-                        st.markdown(result_content, unsafe_allow_html=True)
-                    elif result_content.startswith("data:image/"):
-                        # Base64 data URI - wrap in img tag
-                        st.markdown(f'<img src="{result_content}" style="max-width: 100%; height: auto;">', unsafe_allow_html=True)
-            except json.JSONDecodeError:
-                # If not JSON, display as-is
-                if tool_result.startswith("<html"):
-                    st.components.v1.html(tool_result, height=600, scrolling=True)
-                elif tool_result.startswith("<img"):
-                    st.markdown(tool_result, unsafe_allow_html=True)
-                elif tool_result.startswith("data:image/"):
-                    st.markdown(f'<img src="{tool_result}" style="max-width: 100%; height: auto;">', unsafe_allow_html=True)
+        # Get model name from environment variables
+        model_name = ""
+        if request.provider == "Azure":
+            model_name = os.getenv("AZURE_DEPLOYMENT_NAME", "")
+        elif request.provider == "Claude":
+            model_name = os.getenv("CLAUDE_MODEL_NAME", "")
+        elif request.provider == "XAI":
+            model_name = os.getenv("XAI_MODEL_NAME", "")
+        elif request.provider == "Ollama":
+            model_name = os.getenv("OLLAMA_MODEL_NAME", "")
         
-        # Display final message as markdown (supports base64 images in HTML img tags)
-        st.markdown(final_message.replace("$", r"\$"), unsafe_allow_html=True)
+        # For now, we'll use placeholder token counts since LangChain doesn't easily expose them
+        # In a real implementation, you'd track these from the model responses
+        token_usage = TokenUsage(
+            input_tokens=len(request.query.split()) * 2,  # Rough estimate
+            output_tokens=len(final_message.split()) * 2,  # Rough estimate
+            provider=request.provider,
+            model_name=model_name
+        )
         
-        # Show timings for current message
-        st.caption(f"⏱️ Response time: {total_duration}s")
-        if tool_timings:
-            with st.expander("View tool execution times"):
-                for tool_name, timing in tool_timings.items():
-                    if "duration" in timing:
-                        st.markdown(f"- {tool_name}: {timing['duration']}s")
+        return QueryResponse(
+            response=final_message,
+            tools=tool_executions,
+            response_time=total_response_time,
+            token_usage=token_usage
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
+
+
+@app.post("/sql-query", response_model=SQLQueryResponse)
+async def generate_sql_query(request: SQLQueryRequest):
+    """Generate SQL query without execution for benchmarking"""
+    print("Request received for SQL query generation", request)
     
-    # Add assistant response, execution steps, tool results, and timings to chat history
-    st.session_state.messages.append({
-        "role": "assistant", 
-        "content": final_message, 
-        "execution_steps": execution_steps,
-        "tool_results": tool_results,
-        "total_duration": total_duration,
-        "tool_timings": tool_timings
-    })
+    try:
+        tmp = os.environ.get("SQLITE_DB_PATH")
+        print("Current SQLITE_DB_PATH:", tmp)
+        os.environ["SQLITE_DB_PATH"] = tmp.replace("db_id", request.db_id)
+        print("New SQLITE_DB_PATH:", os.environ.get("SQLITE_DB_PATH"))
+        
+        # Create SQL-only agent with provider for LLM
+        agent = create_sql_only_agent(request.provider)
+        
+        # Convert conversation history to LangChain messages
+        langchain_messages = []
+        for msg in request.conversation_history:
+            if msg["role"] == "user":
+                langchain_messages.append(HumanMessage(content=msg["content"]))
+            elif msg["role"] == "assistant":
+                langchain_messages.append(AIMessage(content=msg["content"]))
+        
+        # Add current query
+        langchain_messages.append(HumanMessage(content=request.query))
+        
+        # Initialize tracking variables
+        response_start_time = time.time()
+        tool_executions = []
+        sql_query = ""
+        hit_limit = False
+        
+        # Process the query
+        for chunk in agent.stream({"messages": langchain_messages}, stream_mode="updates"):
+            for node_name, node_output in chunk.items():
+                # Check if we hit the limit
+                if "hit_limit" in node_output and node_output["hit_limit"]:
+                    hit_limit = True
+                
+                if "messages" in node_output:
+                    for msg in node_output["messages"]:
+                        # Track tool calls
+                        if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                            for tool_call in msg.tool_calls:
+                                tool_start_time = time.time()
+                                
+                        # Track tool results
+                        elif hasattr(msg, 'content') and node_name == "tool_node":
+                            tool_end_time = time.time()
+                            # Extract tool name from previous tool call
+                            if hasattr(msg, 'tool_call_id') and msg.tool_call_id:
+                                # Find the tool name from the tool call
+                                tool_name = "unknown"
+                                for prev_msg in langchain_messages[-5:]:  # Look at recent messages
+                                    if hasattr(prev_msg, 'tool_calls'):
+                                        for tc in prev_msg.tool_calls:
+                                            if tc.get('id') == msg.tool_call_id:
+                                                tool_name = tc.get('name', 'unknown')
+                                                break
+                                
+                                tool_executions.append(ToolExecution(
+                                    tool_name=tool_name,
+                                    tool_response=msg.content,
+                                    tool_execution_time=round(tool_end_time - tool_start_time, 2)
+                                ))
+                        
+                        # Capture final SQL query
+                        elif hasattr(msg, 'content') and node_name == "llm_call" and not msg.tool_calls:
+                            sql_query = msg.content.strip()
+        
+        response_end_time = time.time()
+        total_response_time = round(response_end_time - response_start_time, 2)
+        
+        # Handle hit limit case
+        if hit_limit:
+            sql_query = "SELECT 1 -- Hit tool call limit, unable to generate query"
+        
+        # Get model name from environment variables
+        model_name = ""
+        if request.provider == "Azure":
+            model_name = os.getenv("AZURE_DEPLOYMENT_NAME", "")
+        elif request.provider == "Claude":
+            model_name = os.getenv("CLAUDE_MODEL_NAME", "")
+        elif request.provider == "XAI":
+            model_name = os.getenv("XAI_MODEL_NAME", "")
+        elif request.provider == "Ollama":
+            model_name = os.getenv("OLLAMA_MODEL_NAME", "")
+        
+        # For now, we'll use placeholder token counts since LangChain doesn't easily expose them
+        # In a real implementation, you'd track these from the model responses
+        token_usage = TokenUsage(
+            input_tokens=len(request.query.split()) * 2,  # Rough estimate
+            output_tokens=len(sql_query.split()) * 2,  # Rough estimate
+            provider=request.provider,
+            model_name=model_name
+        )
+        print("SQL Query Response:", sql_query)
+        return SQLQueryResponse(
+            sql_query=sql_query,
+            tools=tool_executions,
+            response_time=total_response_time,
+            token_usage=token_usage
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating SQL query: {str(e)}")
+
+@app.get("/")
+async def root():
+    return {"message": "Database Query Assistant API", "version": "1.0"}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=4747)
