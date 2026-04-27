@@ -80,7 +80,7 @@ class SQLiteConnector(BaseDBConnector):
         self.schema_tables = result
         return result
 
-    def get_create_table_statements(self, table_name: list[str] | str = None):
+    def get_create_table_statements(self, table_name: str = None):
         """Get CREATE TABLE statements for specified tables."""
         # Remove schema prefix from table names if present
         if isinstance(table_name, list):
@@ -200,3 +200,20 @@ class SQLiteConnector(BaseDBConnector):
     def get_query_generation_instructions(self) -> str:
         """Get query generation instructions for SQLite."""
         return "Generate standard SQLite SQL queries. Note: SQLite uses different syntax for some functions like date operations compared to PostgreSQL."
+
+    def get_connection_id(self) -> str:
+        """Generate unique connection ID for SQLite database."""
+        # Use database path and schema structure for unique identification
+        connection_string = f"sqlite:{self.DB_PATH}"
+        
+        # Add schema structure hash for uniqueness
+        try:
+            schemas_tables = self.get_schemas_with_tables()
+            schema_str = str(sorted(schemas_tables.items()))
+            schema_hash = hashlib.md5(schema_str.encode()).hexdigest()[:8]
+        except:
+            schema_hash = "unknown"
+        
+        # Create final connection ID
+        connection_id = f"{hashlib.md5(connection_string.encode()).hexdigest()[:12]}_{schema_hash}"
+        return connection_id

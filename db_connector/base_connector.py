@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple, Any
+import hashlib
 
 class BaseDBConnector(ABC):
     @abstractmethod
@@ -11,7 +12,7 @@ class BaseDBConnector(ABC):
         pass
 
     @abstractmethod
-    def get_create_table_statements(self, table_name: list[str] = None, **kwargs) -> list[str]:
+    def get_create_table_statements(self, table_name: str = None, **kwargs) -> list[str]:
         """
         Get table definition with table name.
         Returns a list of string of table definitions for the specified table names.
@@ -34,5 +35,14 @@ class BaseDBConnector(ABC):
     def get_query_generation_instructions(self) -> str:
         """
         Get query generation instructions for this connector (e.g. SQL, T-SQL, DAX).
+        """
+        pass
+
+    @abstractmethod
+    def get_connection_id(self) -> str:
+        """
+        Generate a unique connection identifier for hint storage/retrieval.
+        Should be based on database type, connection parameters, and schema structure.
+        Excludes sensitive information like passwords.
         """
         pass

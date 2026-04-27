@@ -1,12 +1,9 @@
 from langchain.tools import tool
-from db_connector import get_db_connector, DBType
 import json
 from app_utils import is_safe_code
 import logging, matplotlib, plotly, base64, json, math
-
-
-# Initialize database connector
-db_connector = get_db_connector(DBType.POSTGRES)
+from hint_tools import hint_tools
+from common_config import db_connector
 
 @tool
 def query_db(query: str) -> str:
@@ -42,11 +39,11 @@ def get_schemas_with_tables() -> str:
 
 
 @tool
-def get_create_table_statements(table_name: str | list[str]) -> str:
+def get_create_table_statements(table_name: str) -> str:
     """Get the CREATE TABLE statement for a given table.
 
     Args:
-        table_name: Name of the table as string or list of table names as list of strings
+        table_name: Name of the table as string
     """
     create_table_statement = db_connector.get_create_table_statements(table_name)
     if not create_table_statement:
@@ -93,4 +90,11 @@ def python_code_execution(code: str) -> str:
         return json.dumps({"error": f"Import error: {str(e)}. Available libraries: matplotlib, plotly, base64, json, math"})
     except Exception as e:
         logging.error(f"Execution error: {str(e)}")
-        return json.dumps({"error": f"Execution error: {str(e)}"})
+
+# Export all tools for easy import
+all_tools = [
+    query_db,
+    get_schemas_with_tables, 
+    get_create_table_statements,
+    python_code_execution
+] + hint_tools

@@ -1,4 +1,4 @@
-import asyncio, logging, json, base64, requests, re, os, time
+import asyncio, logging, json, base64, requests, re, os, time, hashlib
 from db_connector.config import generate_user_token, ResponseType
 
 def check_truncation(row_count, col_count):
@@ -170,7 +170,7 @@ class SemanticModelConnector(BaseDBConnector):
         self.schema_tables = {"dbo": []}
         return self.schema_tables
 
-    def get_create_table_statements(self, table_name: list[str] | str = None, token: str = generate_user_token("Fabric")):
+    def get_create_table_statements(self, table_name: str = None, token: str = generate_user_token("Fabric")):
         """Route to correct API based on whether model is Fabric-native or legacy."""
         if not token.startswith("Bearer"):
             token = "Bearer " + token
@@ -277,3 +277,20 @@ class SemanticModelConnector(BaseDBConnector):
 
     def get_query_generation_instructions(self) -> str:
         return "Generate Microsoft DAX (Data Analysis Expressions) queries for this semantic model connection. Note that the semantic model is connected to a Fabric workspace, so you may need to use Fabric-specific DAX functions. **Note that this connection can't execute any type of SQL queries, Only DAX Queries.**"
+
+    def get_connection_id(self) -> str:
+        """Generate unique connection ID for Semantic Model database."""
+        # Use database name and ID (exclude workspace ID for security)
+        connection_string = f"semantic:{self.db_name}:{self.db_id}"
+        
+        # Add schema structure hash for uniqueness
+        try:
+            schemas_tables = self.get_schemas_with_tables()
+            schema_str = str(sorted(schemas_tables.items()))
+            schema_hash = hashlib.md5(schema_str.encode()).hexdigest()[:8]
+        except:
+            schema_hash = "unknown"
+        
+        # Create final connection ID
+        connection_id = f"{hashlib.md5(connection_string.encode()).hexdigest()[:12]}_{schema_hash}"
+        return connection_id

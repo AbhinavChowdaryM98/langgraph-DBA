@@ -210,3 +210,6 @@ __marimo__/
 # Custom
 Temp/
 *.pgdump
+
+# Qdrant vector database storage
+qdrant_data/

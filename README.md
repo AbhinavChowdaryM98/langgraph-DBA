@@ -11,13 +11,24 @@ A sophisticated AI-powered database query assistant built with LangGraph, Stream
 - **Multiple LLM Providers**: Support for Azure OpenAI, Claude (Anthropic Bedrock), XAI, and Ollama
 - **Tool-based Architecture**: LangGraph workflow with intelligent tool selection
 - **Query Optimization**: Smart query generation with schema awareness
+- **Intelligent Hint System**: Learn from successful queries to improve future performance
+  - **Vector-based Pattern Storage**: Uses Qdrant vector database to store SQL patterns
+  - **Connection-scoped Learning**: Hints are organized by unique database connection IDs
+  - **Persistent Storage**: Learned patterns persist across application restarts
+  - **Orchestrator-driven Learning**: AI decides when to add hints based on query complexity and effort
+  - **Semantic Search**: Retrieves relevant hints using embedding-based similarity search
 
 ## Architecture
 
 ### Core Components
 
-- **`app.py`**: Main Streamlit application with LangGraph agent workflow
-- **`tool_definitions.py`**: LangChain tools for database operations and code execution
+- **`app.py`**: FastAPI application with LangGraph agent workflow and REST API endpoints
+- **`streamlit-app.py`**: Streamlit-based UI for interactive database querying
+- **`agent_common.py`**: Shared agent logic and workflow definitions
+- **`common_config.py`**: Centralized configuration for database connector and shared resources
+- **`tool_definitions.py`**: LangChain tools for database operations, code execution, and hint management
+- **`hint_tools.py`**: Hint system tools for learning from successful SQL patterns
+- **`hint_manager.py`**: Qdrant vector database integration for persistent hint storage
 - **`db_connector/`**: Database abstraction layer with multiple connector implementations
 - **`app_utils.py`**: Utility functions for safety checks and validation
 
@@ -117,25 +128,55 @@ az login
 - **Plotly**: Interactive graphs and dashboards
 - **Base64 Encoding**: Direct image embedding in responses
 
+### Intelligent Hint System
+
+The application includes a sophisticated hint system that learns from successful SQL queries to improve future performance:
+
+**How It Works:**
+1. **Query Processing**: When you ask a question, the AI first checks for relevant hints from previous successful queries
+2. **Pattern Storage**: After successfully solving a complex query, the AI may store the pattern as a hint
+3. **Semantic Search**: Hints are retrieved using embedding-based similarity search to find the most relevant patterns
+4. **Connection-scoped**: Hints are organized by unique database connection IDs, ensuring patterns are relevant to the specific database
+
+**Key Features:**
+- **Persistent Storage**: Hints are stored in a local Qdrant vector database (`./qdrant_data/`) and persist across application restarts
+- **Intelligent Learning**: The AI orchestrator decides when to add hints based on query complexity and effort required
+- **No Sensitive Data**: Connection IDs exclude sensitive information like usernames and passwords
+- **Efficient Retrieval**: Uses sentence-transformers embeddings for fast semantic search
+
+**Hint Tools:**
+- `get_hints`: Retrieve relevant hints for a given query
+- `add_hint`: Manually add a hint with full control
+- `add_hint_simple`: Simplified hint addition with orchestrator-driven decision making
+- `get_connection_hint_stats`: View statistics about hints for a connection
+- `clear_connection_hints`: Clear all hints for a specific connection
+
 ## Development
 
 ### Project Structure
 
 ```
 langraph/
-├── app.py                          # Main Streamlit application
-├── app_utils.py                    # Utility functions
-├── tool_definitions.py             # LangChain tool definitions
-├── requirements.txt                # Python dependencies
-├── db_connector/                   # Database connector modules
+├── app.py                          # FastAPI application with REST API
+├── streamlit-app.py               # Streamlit UI for interactive querying
+├── agent_common.py                # Shared agent logic and workflows
+├── common_config.py               # Centralized configuration
+├── tool_definitions.py            # LangChain tool definitions
+├── hint_tools.py                  # Hint system tools
+├── hint_manager.py                # Qdrant vector database manager
+├── app_utils.py                   # Utility functions
+├── requirements.txt               # Python dependencies
+├── db_connector/                  # Database connector modules
 │   ├── __init__.py
-│   ├── base_connector.py          # Abstract base connector
-│   ├── factory.py                 # Connector factory
-│   ├── config.py                  # Configuration utilities
-│   ├── pg_connector.py            # PostgreSQL connector
+│   ├── base_connector.py         # Abstract base connector
+│   ├── factory.py                # Connector factory
+│   ├── config.py                 # Configuration utilities
+│   ├── pg_connector.py           # PostgreSQL connector
 │   ├── semantic_model_connector.py # Semantic model connector
 │   ├── ms_sql_server_connector.py # SQL Server connector
+│   ├── sqlite_connector.py       # SQLite connector
 │   └── legacy_connectors/         # Legacy connector implementations
+├── qdrant_data/                   # Persistent vector database storage (gitignored)
 ├── Temp/                          # Temporary files and testing
 └── readme.md                      # This file
 ```

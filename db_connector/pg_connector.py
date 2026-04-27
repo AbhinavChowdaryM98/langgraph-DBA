@@ -1,4 +1,4 @@
-import logging, psycopg2, os
+import logging, psycopg2, os, hashlib
 from db_connector import config
 from sqlalchemy import create_engine, MetaData
 from sqlalchemy.schema import CreateTable
@@ -64,7 +64,7 @@ class PostgreConnector(BaseDBConnector):
         return result
 
 
-    def get_create_table_statements(self, table_name: list[str] | str = None):
+    def get_create_table_statements(self, table_name: str = None):
         # Remove schema prefix from table names if present
         if isinstance(table_name, list):
             for i in range(len(table_name)):
@@ -177,3 +177,20 @@ class PostgreConnector(BaseDBConnector):
 
     def get_query_generation_instructions(self) -> str:
         return "Generate standard PostgreSQL SQL queries."
+
+    def get_connection_id(self) -> str:
+        """Generate unique connection ID for PostgreSQL database."""
+        # Use host, port, database name (exclude user/password)
+        connection_string = f"postgresql:{self.DB_HOST}:{self.DB_PORT}:{self.DB_NAME}"
+        
+        # Add schema structure hash for uniqueness
+        try:
+            schemas_tables = self.get_schemas_with_tables()
+            schema_str = str(sorted(schemas_tables.items()))
+            schema_hash = hashlib.md5(schema_str.encode()).hexdigest()[:8]
+        except:
+            schema_hash = "unknown"
+        
+        # Create final connection ID
+        connection_id = f"{hashlib.md5(connection_string.encode()).hexdigest()[:12]}_{schema_hash}"
+        return connection_id

@@ -16,4 +16,7 @@ plotly
 kaleido
 fastapi
 uvicorn
-sqlite3
+# sqlite3 is a built-in Python module, no need to install it.
+qdrant-client
+sentence-transformers
+torchvision

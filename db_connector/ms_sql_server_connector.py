@@ -1,6 +1,7 @@
 import base64
 import datetime
 import decimal
+import hashlib
 
 import pyodbc
 
@@ -95,7 +96,7 @@ class SqlServerConnector:
             logger.exception("Failed to get hash schemas: " + str(e))
             return {}
 
-    def get_create_table_statements(self, table_name: list[str] | str = None):
+    def get_create_table_statements(self, table_name: str = None):
         # Remove schema prefix from table names if present
         if isinstance(table_name, list):
             for i in range(len(table_name)):
@@ -224,3 +225,20 @@ class SqlServerConnector:
         except Exception as e:
             logger.error(f"Error executing SQL query on SqlServer connection {self.connection_string}: {e}")
             return [], [], ResponseType.MSG_QUERY_EXECUTION_ERROR.value.format(str(e)), False, 0
+
+    def get_connection_id(self) -> str:
+        """Generate unique connection ID for MS SQL Server database."""
+        # Use server and database name (exclude username/password)
+        connection_string = f"mssql:{self.SERVER}:{self.DATABASE}"
+        
+        # Add schema structure hash for uniqueness
+        try:
+            schemas_tables = self.get_schemas_with_tables()
+            schema_str = str(sorted(schemas_tables.items()))
+            schema_hash = hashlib.md5(schema_str.encode()).hexdigest()[:8]
+        except:
+            schema_hash = "unknown"
+        
+        # Create final connection ID
+        connection_id = f"{hashlib.md5(connection_string.encode()).hexdigest()[:12]}_{schema_hash}"
+        return connection_id
