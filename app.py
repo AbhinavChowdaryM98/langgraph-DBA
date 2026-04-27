@@ -29,6 +29,7 @@ class QueryRequest(BaseModel):
     query: str
     provider: str = "XAI"
     conversation_history: Optional[List[Dict[str, str]]] = []
+    use_qdrant_hints: bool = True  # Enable/disable hint system
 
 class ToolExecution(BaseModel):
     tool_name: str
@@ -52,6 +53,7 @@ class SQLQueryRequest(BaseModel):
     provider: str = "XAI"
     conversation_history: Optional[List[Dict[str, str]]] = []
     db_id: Optional[str] = None  # Optional custom SQLite database ID
+    use_qdrant_hints: bool = True  # Enable/disable hint system
 
 class SQLQueryResponse(BaseModel):
     sql_query: str
@@ -194,7 +196,7 @@ async def query_database(request: QueryRequest):
     
     try:
         # Create agent
-        agent = create_agent(request.provider)
+        agent = create_agent(request.provider, request.use_qdrant_hints)
         
         # Convert conversation history to LangChain messages
         langchain_messages = []
@@ -310,7 +312,7 @@ async def generate_sql_query(request: SQLQueryRequest):
         print("New SQLITE_DB_PATH:", os.environ.get("SQLITE_DB_PATH"))
         
         # Create SQL-only agent with provider for LLM
-        agent = create_sql_only_agent(request.provider)
+        agent = create_sql_only_agent(request.provider, request.use_qdrant_hints)
         
         # Convert conversation history to LangChain messages
         langchain_messages = []
