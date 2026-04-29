@@ -55,6 +55,8 @@ class SQLQueryRequest(BaseModel):
     db_id: Optional[str] = None  # Optional custom SQLite database ID
     connection_id: Optional[str] = None  # Optional connection ID for hint system (defaults to db_id if not provided)
     use_qdrant_hints: bool = True  # Enable/disable hint system
+    db_path: Optional[str] = None  # Optional custom SQLite database path
+    db_type: Optional[str] = "sqlite"  # Database type (sqlite, postgres, etc.)
 
 class SQLQueryResponse(BaseModel):
     sql_query: str
@@ -303,9 +305,13 @@ Here's what I was able to gather so far:
 from db_connector.sqlite_connector import SQLiteConnector
 _connector_cache: dict[str, SQLiteConnector] = {}
 
-def get_connector(db_path: str) -> SQLiteConnector:
+def get_connector(db_path: str, db_type: str = "sqlite") -> SQLiteConnector:
     if db_path not in _connector_cache:
-        _connector_cache[db_path] = SQLiteConnector(db_path=db_path)
+        print(f"Creating new connector for {db_path} with type {db_type}")
+        if db_type == "sqlite":
+            _connector_cache[db_path] = SQLiteConnector(db_path=db_path)
+        else:
+            raise ValueError(f"Unsupported database type: {db_type}")
     return _connector_cache[db_path]
 
 @app.post("/sql-query", response_model=SQLQueryResponse)
@@ -314,12 +320,12 @@ async def generate_sql_query(request: SQLQueryRequest):
     print("Request received for SQL query generation", request)
     
     try:
-        tmp = os.environ.get("SQLITE_DB_PATH")
-        print("Current SQLITE_DB_PATH:", tmp)
+        # tmp = os.environ.get("SQLITE_DB_PATH")
+        # print("Current SQLITE_DB_PATH:", tmp)
         # Create a fresh SQLite connector for this specific database
-        new_db_path = tmp.replace("db_id", request.db_id)
-        print("Creating SQLite connector for db_id:", new_db_path)
-        sqlite_connector = get_connector(new_db_path)
+        # new_db_path = tmp.replace("db_id", request.db_id)
+        print("Creating SQLite connector for db_id:", request.db_path)
+        sqlite_connector = get_connector(request.db_path, request.db_type)
 
         # Create SQL-only agent with provider for LLM
         # Use connection_id from request, or default to db_id
