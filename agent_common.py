@@ -166,10 +166,12 @@ def llm_call_sql_only(state: dict, model_with_tools, use_qdrant_hints: bool = Tr
                         - If hints are helpful, use them to generate SQL quickly
                         - If hints are not relevant, get schema context using get_schemas_with_tables to understand available tables and structure
 
-                        IMPORTANT FOR FILTER ACCURACY:
-                        - When filtering by string values or enums, ALWAYS use get_sample_values(table, column) to see exact values
-                        - This prevents errors like using 'Direct' when the actual value is 'Directly funded'
-                        - Sample values show you the exact format, spelling, and casing used in the database
+                        CRITICAL WORKFLOW FOR FILTER ACCURACY:
+                        1. ALWAYS use get_create_table_statements(table) FIRST to see all available columns
+                        2. ONLY then use get_sample_values(table, column) on columns that exist in the table
+                        3. NEVER assume column names from the question - verify them in the table structure
+                        - The get_sample_values tool will show available columns if you use wrong column names
+                        - This prevents errors like using 'FRPM Count (K-12)' when the actual column is different
 
                         HINT SYSTEM USAGE:
                         - Use get_hints(query, connection_id="{connection_id}") at the start to see relevant patterns for this specific connection
@@ -183,10 +185,12 @@ def llm_call_sql_only(state: dict, model_with_tools, use_qdrant_hints: bool = Tr
         hint_instructions = """
                         - FIRST get schema context using get_schemas_with_tables to understand available tables and structure
 
-                        IMPORTANT FOR FILTER ACCURACY:
-                        - When filtering by string values or enums, ALWAYS use get_sample_values(table, column) to see exact values
-                        - This prevents errors like using 'Direct' when the actual value is 'Directly funded'
-                        - Sample values show you the exact format, spelling, and casing used in the database
+                        CRITICAL WORKFLOW FOR FILTER ACCURACY:
+                        1. ALWAYS use get_create_table_statements(table) FIRST to see all available columns
+                        2. ONLY then use get_sample_values(table, column) on columns that exist in the table
+                        3. NEVER assume column names from the question - verify them in the table structure
+                        - The get_sample_values tool will show available columns if you use wrong column names
+                        - This prevents errors like using 'FRPM Count (K-12)' when the actual column is different
 
                         Available tools: get_schemas_with_tables, get_create_table_statements, get_sample_values, get_full_schema"""
 

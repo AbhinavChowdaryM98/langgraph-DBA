@@ -379,13 +379,24 @@ async def generate_sql_query(request: SQLQueryRequest):
                         
                         # Capture final SQL query
                         elif hasattr(msg, 'content') and node_name == "llm_call" and not msg.tool_calls:
-                            sql_query = msg.content.strip()
-                            # Validate SQL output - must start with valid SQL keywords
-                            sql_upper = sql_query.upper().strip()
+                            content = msg.content.strip()
+                            # Extract SQL from response - look for SQL keywords and extract from there
+                            sql_upper = content.upper()
                             valid_starts = ['SELECT', 'WITH', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP']
-                            if not any(sql_upper.startswith(start) for start in valid_starts):
+
+                            # Find where SQL starts
+                            sql_start_idx = -1
+                            for start in valid_starts:
+                                idx = sql_upper.find(start)
+                                if idx != -1 and (sql_start_idx == -1 or idx < sql_start_idx):
+                                    sql_start_idx = idx
+
+                            if sql_start_idx != -1:
+                                # Extract SQL from the first SQL keyword found
+                                sql_query = content[sql_start_idx:].strip()
+                            else:
                                 # LLM likely output refusal text instead of SQL
-                                print(f"Invalid SQL output detected: {sql_query[:100]}...")
+                                print(f"Invalid SQL output detected: {content[:100]}...")
                                 sql_query = "SELECT 1 -- LLM refused to generate valid SQL"
         
         response_end_time = time.time()

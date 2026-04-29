@@ -247,8 +247,23 @@ ACCURACY RULES:
             conn = sqlite3.connect(self.DB_PATH)
             cursor = conn.cursor()
 
+            # First, get all columns in the table to help debug
+            cursor.execute(f"PRAGMA table_info(`{table_name}`)")
+            table_info = cursor.fetchall()
+            available_columns = [col[1] for col in table_info]
+            
+            # Strip quotes from column_name for comparison
+            clean_column_name = column_name.strip('"')
+            
+            # Check if column exists
+            if clean_column_name not in available_columns:
+                logging.error(f"Column '{column_name}' not found in table '{table_name}'. Available columns: {available_columns}")
+                cursor.close()
+                conn.close()
+                return []
+
             # Query to get distinct sample values
-            query = f"SELECT DISTINCT `{column_name}` FROM `{table_name}` LIMIT {limit}"
+            query = f"SELECT DISTINCT `{clean_column_name}` FROM `{table_name}` LIMIT {limit}"
             cursor.execute(query)
             result = cursor.fetchall()
 
@@ -257,7 +272,8 @@ ACCURACY RULES:
 
             # Extract values and convert to strings
             values = [str(row[0]) if row[0] is not None else "NULL" for row in result]
+            logging.info(f"Successfully retrieved {len(values)} sample values from {table_name}.{clean_column_name}")
             return values
         except Exception as e:
-            logging.error(f"Error getting sample values: {e}")
+            logging.error(f"Error getting sample values from {table_name}.{column_name}: {e}")
             return []
