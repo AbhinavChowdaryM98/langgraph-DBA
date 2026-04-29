@@ -65,6 +65,10 @@ def llm_call(state: dict, model_with_tools):
                         - You're connected to a datasource with query generation instructions: {db_connector.get_query_generation_instructions()}
                         - If you're struggling to generate a query, use the query execution tool to get 5 sample rows of data to understand the schema and data better
 
+                        IMPORTANT FOR FILTER ACCURACY:
+                        - When filtering by string values or enums, ALWAYS use get_sample_values(table, column) to see exact values
+                        - Sample values show you the exact format, spelling, and casing used in the database
+
                         HINT SYSTEM USAGE:
                         - Use get_hints(query) at the start to see relevant patterns
                         - When calling get_hints or add_hint_simple, you may optionally pass connection_id if you have a specific connection context
@@ -152,7 +156,7 @@ def create_agent(provider: str = "XAI", use_qdrant_hints: bool = True):
     # Compile the agent
     return agent_builder.compile()
 
-def llm_call_sql_only(state: dict, model_with_tools, use_qdrant_hints: bool = True, connection_id: str = None):
+def llm_call_sql_only(state: dict, model_with_tools, use_qdrant_hints: bool = True, connection_id: str = None, sqlite_connector=None):
     """LLM generates SQL queries without execution"""
     # Build system message based on hint availability
     if use_qdrant_hints:
@@ -162,6 +166,11 @@ def llm_call_sql_only(state: dict, model_with_tools, use_qdrant_hints: bool = Tr
                         - If hints are helpful, use them to generate SQL quickly
                         - If hints are not relevant, get schema context using get_schemas_with_tables to understand available tables and structure
 
+                        IMPORTANT FOR FILTER ACCURACY:
+                        - When filtering by string values or enums, ALWAYS use get_sample_values(table, column) to see exact values
+                        - This prevents errors like using 'Direct' when the actual value is 'Directly funded'
+                        - Sample values show you the exact format, spelling, and casing used in the database
+
                         HINT SYSTEM USAGE:
                         - Use get_hints(query, connection_id="{connection_id}") at the start to see relevant patterns for this specific connection
                         - After successfully generating a complex query, you may use add_hint_simple(query, sql_query, connection_id="{connection_id}") to store the pattern
@@ -169,12 +178,21 @@ def llm_call_sql_only(state: dict, model_with_tools, use_qdrant_hints: bool = Tr
                         - IMPORTANT: After using add_hint_simple, you MUST continue to provide your final SQL query
                         - Hint tools are optional side operations - they do NOT replace your final response
 
-                        Available tools: get_schemas_with_tables, get_create_table_statements, get_hints, add_hint_simple"""
+                        Available tools: get_schemas_with_tables, get_create_table_statements, get_sample_values, get_full_schema, get_hints, add_hint_simple"""
     else:
         hint_instructions = """
                         - FIRST get schema context using get_schemas_with_tables to understand available tables and structure
 
-                        Available tools: get_schemas_with_tables, get_create_table_statements"""
+                        IMPORTANT FOR FILTER ACCURACY:
+                        - When filtering by string values or enums, ALWAYS use get_sample_values(table, column) to see exact values
+                        - This prevents errors like using 'Direct' when the actual value is 'Directly funded'
+                        - Sample values show you the exact format, spelling, and casing used in the database
+
+                        Available tools: get_schemas_with_tables, get_create_table_statements, get_sample_values, get_full_schema"""
+
+    # Use provided sqlite_connector or fall back to global db_connector
+    connector = sqlite_connector if sqlite_connector else db_connector
+    query_instructions = connector.get_query_generation_instructions()
 
     return {
         "messages": [
@@ -188,7 +206,7 @@ def llm_call_sql_only(state: dict, model_with_tools, use_qdrant_hints: bool = Tr
                         - Return the raw SQL query as your final response
                         - Do NOT include ```sql or any other formatting
                         - Do NOT execute queries or provide results
-                        - You're connected to a datasource with query generation instructions: {db_connector.get_query_generation_instructions()}
+                        - You're connected to a datasource with query generation instructions: {query_instructions}
 
                         Do NOT use query_db or python_code_execution tools."""
                     )
@@ -200,14 +218,15 @@ def llm_call_sql_only(state: dict, model_with_tools, use_qdrant_hints: bool = Tr
         "hit_limit": state.get('hit_limit', False)
     }
 
-def create_sql_only_agent(provider: str = "XAI", use_qdrant_hints: bool = True, connection_id: str = None):
+def create_sql_only_agent(provider: str = "XAI", use_qdrant_hints: bool = True, connection_id: str = None, sqlite_connector=None):
     """Create and compile the SQL-only agent."""
     model = model_init(provider)
 
-    # Create SQLite-specific tools
-    from db_connector.factory import DBType
-    from db_connector.sqlite_connector import SQLiteConnector
-    sqlite_connector = SQLiteConnector()
+    # Use provided sqlite_connector or create a new one
+    if sqlite_connector is None:
+        from db_connector.factory import DBType
+        from db_connector.sqlite_connector import SQLiteConnector
+        sqlite_connector = SQLiteConnector()
 
     # Create SQLite-specific tool functions
     @tool
@@ -226,8 +245,89 @@ def create_sql_only_agent(provider: str = "XAI", use_qdrant_hints: bool = True, 
             return json.dumps({"error": "Failed to get create table statement"})
         return json.dumps({"create_table_statement": create_table_statement}, default=str)
 
+    @tool
+    def sqlite_get_sample_values(table_name: str, column_name: str, limit: int = 10) -> str:
+        """Get sample values from a specific column to understand data patterns and exact filter values.
+
+        Use this tool when:
+        - You need to know exact values for filtering (e.g., enum values, string matching)
+        - You're unsure about the exact format or spelling of values in a column
+        - The question mentions specific values and you need to verify they exist
+
+        Args:
+            table_name: Name of the table
+            column_name: Name of the column to sample
+            limit: Maximum number of distinct values to return (default: 10)
+
+        Returns:
+            JSON string with sample values
+        """
+        try:
+            values = sqlite_connector.get_sample_values(table_name, column_name, limit)
+            return json.dumps({
+                "table": table_name,
+                "column": column_name,
+                "sample_values": values,
+                "count": len(values)
+            }, indent=2)
+        except Exception as e:
+            return json.dumps({"error": f"Failed to get sample values: {str(e)}"}, indent=2)
+    
+    @tool
+    def sqlite_get_full_schema() -> str:
+        """Get complete schema with CREATE statements and sample values for text columns.
+        Call this ONCE at the start. Do not call get_schemas_with_tables or get_create_table_statements separately."""
+        try:
+            schemas = sqlite_connector.get_schemas_with_tables()
+            all_tables = [t for tables in schemas.values() for t in tables]
+            ddl_list = sqlite_connector.get_create_table_statements(all_tables)
+            
+            # For each table, get sample values for text columns
+            conn = sqlite3.connect(sqlite_connector.DB_PATH)
+            cursor = conn.cursor()
+            
+            schema_blocks = []
+            for i, table in enumerate(all_tables):
+                block = ddl_list[i] if i < len(ddl_list) else ""
+                
+                # Get column info
+                cursor.execute(f"PRAGMA table_info(`{table}`)")
+                cols = cursor.fetchall()
+                
+                sample_lines = []
+                for col in cols:
+                    col_name = col[1]
+                    col_type = col[2].upper() if col[2] else ""
+                    # Only sample text/varchar columns — skip numeric/date
+                    if any(t in col_type for t in ["TEXT", "VARCHAR", "CHAR", "CLOB"]) or col_type == "":
+                        try:
+                            cursor.execute(
+                                f'SELECT DISTINCT "{col_name}" FROM "{table}" '
+                                f'WHERE "{col_name}" IS NOT NULL LIMIT 5'
+                            )
+                            vals = [str(r[0]) for r in cursor.fetchall()]
+                            if vals:
+                                sample_lines.append(f"  -- {col_name}: {', '.join(vals)}")
+                        except:
+                            pass
+                
+                if sample_lines:
+                    block += "\n/* Sample values:\n" + "\n".join(sample_lines) + "\n*/"
+                
+                schema_blocks.append(block)
+            
+            cursor.close()
+            conn.close()
+            
+            return json.dumps({
+                "tables": all_tables,
+                "schema": "\n\n".join(schema_blocks)
+            }, default=str)
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
     # Build base tools list
-    tools = [sqlite_get_schemas_with_tables, sqlite_get_create_table_statements]
+    tools = [sqlite_get_schemas_with_tables, sqlite_get_create_table_statements, sqlite_get_sample_values, sqlite_get_full_schema]
 
     # Conditionally add hint tools based on flag
     if use_qdrant_hints:
@@ -239,7 +339,7 @@ def create_sql_only_agent(provider: str = "XAI", use_qdrant_hints: bool = True, 
 
     # Build workflow
     agent_builder = StateGraph(MessagesState)
-    agent_builder.add_node("llm_call", lambda state: llm_call_sql_only(state, model_with_tools, use_qdrant_hints, connection_id))
+    agent_builder.add_node("llm_call", lambda state: llm_call_sql_only(state, model_with_tools, use_qdrant_hints, connection_id, sqlite_connector))
     agent_builder.add_node("tool_node", lambda state: tool_node(state, tools_by_name))
 
     # Add edges to connect nodes

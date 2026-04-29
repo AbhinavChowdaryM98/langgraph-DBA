@@ -2,11 +2,14 @@ import base64
 import datetime
 import decimal
 import hashlib
+import logging
 
 import pyodbc
 
 
 from db_connector.config import remove_order_by, ResponseType
+
+logger = logging.getLogger(__name__)
 
 
 def sanitize_value(val):
@@ -230,7 +233,7 @@ class SqlServerConnector:
         """Generate unique connection ID for MS SQL Server database."""
         # Use server and database name (exclude username/password)
         connection_string = f"mssql:{self.SERVER}:{self.DATABASE}"
-        
+
         # Add schema structure hash for uniqueness
         try:
             schemas_tables = self.get_schemas_with_tables()
@@ -238,7 +241,27 @@ class SqlServerConnector:
             schema_hash = hashlib.md5(schema_str.encode()).hexdigest()[:8]
         except:
             schema_hash = "unknown"
-        
+
         # Create final connection ID
         connection_id = f"{hashlib.md5(connection_string.encode()).hexdigest()[:12]}_{schema_hash}"
         return connection_id
+
+    def get_sample_values(self, table_name: str, column_name: str, limit: int = 10) -> list:
+        """Get sample values from a specific column to understand data patterns."""
+        try:
+            with pyodbc.connect(self.connection_string) as conn:
+                cursor = conn.cursor()
+
+                # Query to get distinct sample values
+                query = f"SELECT DISTINCT [{column_name}] FROM [{table_name}] LIMIT {limit}"
+                cursor.execute(query)
+                result = cursor.fetchall()
+
+                cursor.close()
+
+                # Extract values and convert to strings
+                values = [str(sanitize_value(row[0])) if row[0] is not None else "NULL" for row in result]
+                return values
+        except Exception as e:
+            logger.error(f"Error getting sample values: {e}")
+            return []

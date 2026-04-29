@@ -300,6 +300,13 @@ Here's what I was able to gather so far:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
 
+from db_connector.sqlite_connector import SQLiteConnector
+_connector_cache: dict[str, SQLiteConnector] = {}
+
+def get_connector(db_path: str) -> SQLiteConnector:
+    if db_path not in _connector_cache:
+        _connector_cache[db_path] = SQLiteConnector(db_path=db_path)
+    return _connector_cache[db_path]
 
 @app.post("/sql-query", response_model=SQLQueryResponse)
 async def generate_sql_query(request: SQLQueryRequest):
@@ -309,13 +316,15 @@ async def generate_sql_query(request: SQLQueryRequest):
     try:
         tmp = os.environ.get("SQLITE_DB_PATH")
         print("Current SQLITE_DB_PATH:", tmp)
-        os.environ["SQLITE_DB_PATH"] = tmp.replace("db_id", request.db_id)
-        print("New SQLITE_DB_PATH:", os.environ.get("SQLITE_DB_PATH"))
-        
+        # Create a fresh SQLite connector for this specific database
+        new_db_path = tmp.replace("db_id", request.db_id)
+        print("Creating SQLite connector for db_id:", new_db_path)
+        sqlite_connector = get_connector(new_db_path)
+
         # Create SQL-only agent with provider for LLM
         # Use connection_id from request, or default to db_id
         connection_id = request.connection_id or request.db_id
-        agent = create_sql_only_agent(request.provider, request.use_qdrant_hints, connection_id)
+        agent = create_sql_only_agent(request.provider, request.use_qdrant_hints, connection_id, sqlite_connector)
         
         # Convert conversation history to LangChain messages
         langchain_messages = []
@@ -371,6 +380,13 @@ async def generate_sql_query(request: SQLQueryRequest):
                         # Capture final SQL query
                         elif hasattr(msg, 'content') and node_name == "llm_call" and not msg.tool_calls:
                             sql_query = msg.content.strip()
+                            # Validate SQL output - must start with valid SQL keywords
+                            sql_upper = sql_query.upper().strip()
+                            valid_starts = ['SELECT', 'WITH', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP']
+                            if not any(sql_upper.startswith(start) for start in valid_starts):
+                                # LLM likely output refusal text instead of SQL
+                                print(f"Invalid SQL output detected: {sql_query[:100]}...")
+                                sql_query = "SELECT 1 -- LLM refused to generate valid SQL"
         
         response_end_time = time.time()
         total_response_time = round(response_end_time - response_start_time, 2)

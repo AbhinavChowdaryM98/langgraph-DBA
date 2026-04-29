@@ -182,7 +182,7 @@ class PostgreConnector(BaseDBConnector):
         """Generate unique connection ID for PostgreSQL database."""
         # Use host, port, database name (exclude user/password)
         connection_string = f"postgresql:{self.DB_HOST}:{self.DB_PORT}:{self.DB_NAME}"
-        
+
         # Add schema structure hash for uniqueness
         try:
             schemas_tables = self.get_schemas_with_tables()
@@ -190,7 +190,34 @@ class PostgreConnector(BaseDBConnector):
             schema_hash = hashlib.md5(schema_str.encode()).hexdigest()[:8]
         except:
             schema_hash = "unknown"
-        
+
         # Create final connection ID
         connection_id = f"{hashlib.md5(connection_string.encode()).hexdigest()[:12]}_{schema_hash}"
         return connection_id
+
+    def get_sample_values(self, table_name: str, column_name: str, limit: int = 10) -> list:
+        """Get sample values from a specific column to understand data patterns."""
+        try:
+            conn = psycopg2.connect(
+                dbname=self.DB_NAME,
+                user=self.DB_USER,
+                password=self.DB_PASSWORD,
+                host=self.DB_HOST,
+                port=self.DB_PORT
+            )
+            cursor = conn.cursor()
+
+            # Query to get distinct sample values
+            query = f'SELECT DISTINCT "{column_name}" FROM "{table_name}" LIMIT {limit}'
+            cursor.execute(query)
+            result = cursor.fetchall()
+
+            cursor.close()
+            conn.close()
+
+            # Extract values and convert to strings
+            values = [str(row[0]) if row[0] is not None else "NULL" for row in result]
+            return values
+        except Exception as e:
+            logging.error(f"Error getting sample values: {e}")
+            return []

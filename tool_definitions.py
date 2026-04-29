@@ -52,6 +52,35 @@ def get_create_table_statements(table_name: str) -> str:
 
 
 @tool
+def get_sample_values(table_name: str, column_name: str, limit: int = 10) -> str:
+    """Get sample values from a specific column to understand data patterns and exact filter values.
+
+    Use this tool when:
+    - You need to know exact values for filtering (e.g., enum values, string matching)
+    - You're unsure about the exact format or spelling of values in a column
+    - The question mentions specific values and you need to verify they exist
+
+    Args:
+        table_name: Name of the table
+        column_name: Name of the column to sample
+        limit: Maximum number of distinct values to return (default: 10)
+
+    Returns:
+        JSON string with sample values
+    """
+    try:
+        values = db_connector.get_sample_values(table_name, column_name, limit)
+        return json.dumps({
+            "table": table_name,
+            "column": column_name,
+            "sample_values": values,
+            "count": len(values)
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to get sample values: {str(e)}"}, indent=2)
+
+
+@tool
 def python_code_execution(code: str) -> str:
     """Execute Python code for generating visualizations and data analysis.
     
@@ -91,10 +120,20 @@ def python_code_execution(code: str) -> str:
     except Exception as e:
         logging.error(f"Execution error: {str(e)}")
 
+@tool
+def get_full_schema() -> str:
+    """Get complete schema: all tables with CREATE statements and column info."""
+    schemas = db_connector.get_schemas_with_tables()
+    all_tables = [t for tables in schemas.values() for t in tables]
+    ddl = db_connector.get_create_table_statements(all_tables)
+    return json.dumps({"tables": all_tables, "ddl": ddl}, default=str)
+
 # Export all tools for easy import
 all_tools = [
     query_db,
-    get_schemas_with_tables, 
+    get_schemas_with_tables,
     get_create_table_statements,
-    python_code_execution
+    get_sample_values,
+    python_code_execution,
+    get_full_schema
 ] + hint_tools

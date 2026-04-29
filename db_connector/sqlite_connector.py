@@ -1,4 +1,5 @@
 import logging, sqlite3, os
+from this import d
 from db_connector import config
 from sqlalchemy import create_engine, MetaData
 from sqlalchemy.schema import CreateTable
@@ -14,9 +15,12 @@ warnings.filterwarnings(
 from .base_connector import BaseDBConnector
 
 class SQLiteConnector(BaseDBConnector):
-    def __init__(self) -> None:
+    def __init__(self, db_path: str = None) -> None:
         # Normalize path to handle both single and double backslashes
-        self.DB_PATH = os.getenv("SQLITE_DB_PATH", "database.db")
+        if db_path:
+            self.DB_PATH = db_path
+        else:
+            self.DB_PATH = os.getenv("SQLITE_DB_PATH", "database.db")
         self.schemas = None
         self.schema_tables = None
         
@@ -198,14 +202,33 @@ class SQLiteConnector(BaseDBConnector):
         return column_names, result, response, status
 
     def get_query_generation_instructions(self) -> str:
-        """Get query generation instructions for SQLite."""
-        return "Generate standard SQLite SQL queries. Note: SQLite uses different syntax for some functions like date operations compared to PostgreSQL."
+        return """
+Generate standard SQLite SQL queries. Follow these rules strictly:
 
+SYNTAX RULES:
+- Column names with spaces: wrap in double quotes e.g. "Free Meal Count (K-12)"
+- NO backticks, NO square brackets
+- NO QUALIFY clause (not supported)
+- NO CONCAT() — use || operator e.g. first_name || ' ' || last_name
+- NO ISNULL() — use IS NULL / IS NOT NULL
+- Date functions: use strftime('%Y', date_col) not YEAR()
+- String functions: use INSTR() not CHARINDEX(), use SUBSTR() not SUBSTRING()
+- Boolean: SQLite has no bool type, use 1/0 or 'Y'/'N' depending on column
+
+ACCURACY RULES:
+- Column names are case-sensitive — use exact casing from CREATE TABLE
+- String filter values are case-sensitive — verify with get_sample_values before filtering
+- When dividing integers, cast to REAL: CAST(numerator AS REAL) / denominator
+- Always handle NULL in aggregations: use WHERE col IS NOT NULL when computing rates/ratios
+- For LIMIT queries, always include ORDER BY to get deterministic results
+- Never assume enum values — always check with get_sample_values first
+        """
+    
     def get_connection_id(self) -> str:
         """Generate unique connection ID for SQLite database."""
         # Use database path and schema structure for unique identification
         connection_string = f"sqlite:{self.DB_PATH}"
-        
+
         # Add schema structure hash for uniqueness
         try:
             schemas_tables = self.get_schemas_with_tables()
@@ -213,7 +236,28 @@ class SQLiteConnector(BaseDBConnector):
             schema_hash = hashlib.md5(schema_str.encode()).hexdigest()[:8]
         except:
             schema_hash = "unknown"
-        
+
         # Create final connection ID
         connection_id = f"{hashlib.md5(connection_string.encode()).hexdigest()[:12]}_{schema_hash}"
         return connection_id
+
+    def get_sample_values(self, table_name: str, column_name: str, limit: int = 10) -> list:
+        """Get sample values from a specific column to understand data patterns."""
+        try:
+            conn = sqlite3.connect(self.DB_PATH)
+            cursor = conn.cursor()
+
+            # Query to get distinct sample values
+            query = f"SELECT DISTINCT `{column_name}` FROM `{table_name}` LIMIT {limit}"
+            cursor.execute(query)
+            result = cursor.fetchall()
+
+            cursor.close()
+            conn.close()
+
+            # Extract values and convert to strings
+            values = [str(row[0]) if row[0] is not None else "NULL" for row in result]
+            return values
+        except Exception as e:
+            logging.error(f"Error getting sample values: {e}")
+            return []

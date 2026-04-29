@@ -46,3 +46,19 @@ class BaseDBConnector(ABC):
         Excludes sensitive information like passwords.
         """
         pass
+
+    @abstractmethod
+    def get_sample_values(self, table_name: str, column_name: str, limit: int = 10) -> list:
+        """
+        Get sample values from a specific column to understand data patterns.
+        Useful for understanding exact filter values, enum values, and data formats.
+
+        Args:
+            table_name: Name of the table
+            column_name: Name of the column to sample
+            limit: Maximum number of distinct values to return (default: 10)
+
+        Returns:
+            List of sample values as strings
+        """
+        pass
