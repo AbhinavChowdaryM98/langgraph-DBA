@@ -303,16 +303,45 @@ Here's what I was able to gather so far:
         raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
 
 from db_connector.sqlite_connector import SQLiteConnector
-_connector_cache: dict[str, SQLiteConnector] = {}
+from db_connector.base_connector import BaseDBConnector
+from collections import OrderedDict
+import time
 
-def get_connector(db_path: str, db_type: str = "sqlite") -> SQLiteConnector:
-    if db_path not in _connector_cache:
+class ConnectorCache:
+    """LRU cache for database connectors with size limit."""
+    def __init__(self, max_size: int = 50):
+        self.cache: OrderedDict[str, tuple[BaseDBConnector, float]] = OrderedDict()
+        self.max_size = max_size
+
+    def get(self, key: str) -> BaseDBConnector:
+        """Get connector from cache, moving it to most recently used."""
+        if key in self.cache:
+            connector, _ = self.cache[key]
+            # Move to end (most recently used)
+            self.cache.move_to_end(key)
+            return connector
+        return None
+
+    def put(self, key: str, connector: BaseDBConnector) -> None:
+        """Add connector to cache, evicting oldest if at capacity."""
+        # Evict oldest if at capacity
+        if len(self.cache) >= self.max_size:
+            self.cache.popitem(last=False)
+        self.cache[key] = (connector, time.time())
+
+_connector_cache = ConnectorCache(max_size=50)
+
+def get_connector(db_path: str, db_type: str = "sqlite") -> BaseDBConnector:
+    cache_key = f"{db_type}:{db_path}"
+    connector = _connector_cache.get(cache_key)
+    if connector is None:
         print(f"Creating new connector for {db_path} with type {db_type}")
         if db_type == "sqlite":
-            _connector_cache[db_path] = SQLiteConnector(db_path=db_path)
+            connector = SQLiteConnector(db_path=db_path)
         else:
             raise ValueError(f"Unsupported database type: {db_type}")
-    return _connector_cache[db_path]
+        _connector_cache.put(cache_key, connector)
+    return connector
 
 @app.post("/sql-query", response_model=SQLQueryResponse)
 async def generate_sql_query(request: SQLQueryRequest):
@@ -324,13 +353,29 @@ async def generate_sql_query(request: SQLQueryRequest):
         # print("Current SQLITE_DB_PATH:", tmp)
         # Create a fresh SQLite connector for this specific database
         # new_db_path = tmp.replace("db_id", request.db_id)
-        print("Creating SQLite connector for db_id:", request.db_path)
-        sqlite_connector = get_connector(request.db_path, request.db_type)
+        if os.path.exists(request.db_path):
+            logging.info("Database file exists")
+        else:
+            logging.warning("Database file does not exist")
+            return SQLQueryResponse(
+                sql_query="",
+                response="Database file not found",
+                tools=[],
+                response_time=0.0,
+                token_usage=TokenUsage(
+                    input_tokens=0,
+                    output_tokens=0,
+                    provider=request.provider,
+                    model_name=""
+                )
+            )
+        logging.info("Creating SQLite connector for db_id: %s", request.db_path)
+        db_connector = get_connector(request.db_path, request.db_type)
 
         # Create SQL-only agent with provider for LLM
         # Use connection_id from request, or default to db_id
-        connection_id = request.connection_id or request.db_id
-        agent = create_sql_only_agent(request.provider, request.use_qdrant_hints, connection_id, sqlite_connector)
+        connection_id = db_connector.get_connection_id()
+        agent = create_sql_only_agent(request.provider, request.use_qdrant_hints, connection_id, db_connector)
         
         # Convert conversation history to LangChain messages
         langchain_messages = []

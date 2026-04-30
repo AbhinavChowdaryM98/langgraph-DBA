@@ -276,13 +276,63 @@ class SemanticModelConnector(BaseDBConnector):
             return [], [], f"Couldn't connect to the provided Semantic model to execute the DAX query. Error: {error_msg}", False
 
     def get_query_generation_instructions(self) -> str:
-        return "Generate Microsoft DAX (Data Analysis Expressions) queries for this semantic model connection. Note that the semantic model is connected to a Fabric workspace, so you may need to use Fabric-specific DAX functions. **Note that this connection can't execute any type of SQL queries, Only DAX Queries.**"
+        return """
+Generate standard DAX queries for Microsoft Fabric Semantic Models. Follow these rules strictly:
+
+QUERY STRUCTURE RULES:
+- Always use EVALUATE as the top-level keyword — DAX queries must start with EVALUATE
+- For tabular results: EVALUATE <table_expression>
+- For scalar results: EVALUATE ROW("Result", <scalar_expression>)
+- Use SUMMARIZECOLUMNS for aggregations with grouping — prefer over SUMMARIZE
+- Use ADDCOLUMNS to add calculated columns to a table expression
+- ORDER BY clause comes after EVALUATE, not inside it
+- TOPN for limiting rows: TOPN(10, table, [sort_column], DESC)
+- No semicolons at end of DAX queries
+
+SYNTAX RULES:
+- Table names: wrap in single quotes if they contain spaces e.g. 'Sales Data'
+- Column references: always fully qualify as 'TableName'[ColumnName]
+- Measure references: use [MeasureName] without table prefix
+- String literals: use double quotes e.g. "North"
+- No SELECT, FROM, WHERE, JOIN — these are SQL keywords, not DAX
+- Filtering: use FILTER() or CALCULATETABLE() not WHERE
+- CALCULATE() to modify filter context for measures
+- VAR / RETURN for intermediate calculations
+
+ACCURACY RULES:
+- Column and table names are case-insensitive but use exact casing from schema for clarity
+- String filter values are case-insensitive in DAX
+- Always fully qualify column references to avoid ambiguity across tables
+- Relationships are implicit — do not write explicit JOINs, rely on the model's defined relationships
+- Never assume measure names — verify from schema before using
+- Use RELATED() to traverse relationships from many-side to one-side
+- Use RELATEDTABLE() to traverse from one-side to many-side
+
+AGGREGATION RULES:
+- SUMX, AVERAGEX, COUNTX for row-by-row iteration over a table
+- SUM, AVERAGE, COUNT for simple column aggregations
+- DISTINCTCOUNT for unique value counts
+- DIVIDE(numerator, denominator, 0) — always use DIVIDE() not / to handle division by zero
+- CALCULATE(SUM([Col]), FILTER(Table, condition)) to aggregate with conditions
+
+FILTER CONTEXT RULES:
+- ALL() to remove filters: CALCULATE([Measure], ALL('Table'))
+- ALLEXCEPT() to remove all filters except specified columns
+- KEEPFILTERS() to preserve existing filters while adding new ones
+- REMOVEFILTERS() as a cleaner alternative to ALL() in CALCULATE
+
+TYPE HANDLING:
+- Date filtering: use DATE(year, month, day) or DATEVALUE("2024-01-01")
+- Date intelligence: DATESYTD, DATESINPERIOD, SAMEPERIODLASTYEAR for time comparisons
+- Blank handling: ISBLANK() not IS NULL, BLANK() not NULL
+- Text conversion: FORMAT() for numbers to text, VALUE() for text to number
+"""
 
     def get_connection_id(self) -> str:
         """Generate unique connection ID for Semantic Model database."""
         # Use database name and ID (exclude workspace ID for security)
         connection_string = f"semantic:{self.db_name}:{self.db_id}"
-        
+
         # Add schema structure hash for uniqueness
         try:
             schemas_tables = self.get_schemas_with_tables()
@@ -290,7 +340,98 @@ class SemanticModelConnector(BaseDBConnector):
             schema_hash = hashlib.md5(schema_str.encode()).hexdigest()[:8]
         except:
             schema_hash = "unknown"
-        
+
         # Create final connection ID
         connection_id = f"{hashlib.md5(connection_string.encode()).hexdigest()[:12]}_{schema_hash}"
         return connection_id
+
+    def get_sample_values(self, table_name: str, column_name: str, limit: int = 10) -> list:
+        """Get distinct non-null sample values from a DAX column.
+
+        Args:
+            table_name: Table name in the semantic model (e.g., 'Sales Data')
+            column_name: Column name in the table (e.g., 'Region')
+            limit: Max distinct values to return (default 10, capped at 100)
+
+        Returns:
+            List of string-coerced values, empty list on any failure.
+
+        Raises:
+            Nothing — all exceptions are caught and logged.
+        """
+        clean_table = table_name.strip('"\'')
+        clean_column = column_name.strip('"\'')
+        limit = min(max(1, limit), 100)  # clamp: 1–100
+
+        try:
+            # Use VALUES() to get distinct values, TOPN() to limit results
+            dax_query = f'EVALUATE TOPN({limit}, VALUES(\'{clean_table}\'[\'{clean_column}\']), \'{clean_table}\'[\'{clean_column}\'], ASC)'
+
+            # Execute the DAX query
+            token = generate_user_token("Livy Session")
+            if not token.startswith("Bearer"):
+                token = "Bearer " + token
+
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": token
+            }
+
+            body = {
+                "queries": [{"query": dax_query}],
+                "serializerSettings": {"includeNulls": True}
+            }
+
+            response = requests.post(self.db_host, headers=headers, json=body)
+
+            if response.status_code != 200:
+                logging.error(
+                    "get_sample_values: DAX query failed with status %d: %s",
+                    response.status_code, response.text
+                )
+                return []
+
+            data = response.json()
+            results = data.get("results", [])
+            if not results:
+                logging.error("get_sample_values: no results returned from DAX query")
+                return []
+
+            tables = results[0].get("tables", [])
+            if not tables:
+                logging.error("get_sample_values: no tables in DAX results")
+                return []
+
+            rows = tables[0].get("rows", [])
+            if not rows:
+                logging.debug("get_sample_values: no rows returned (empty column)")
+                return []
+
+            # Extract values from the first column of results
+            # DAX returns column names in format like '[ColumnName]'
+            column_key = f"[{clean_column}]"
+            values = []
+            for row in rows:
+                if column_key in row:
+                    val = row[column_key]
+                    if val is not None:
+                        values.append(str(val))
+
+            logging.debug(
+                "get_sample_values: %d values from %s[%s]",
+                len(values), clean_table, clean_column
+            )
+            return values
+
+        except requests.exceptions.RequestException as e:
+            logging.error(
+                "get_sample_values: HTTP error on %s[%s] — %s",
+                clean_table, clean_column, e
+            )
+            return []
+        except Exception:
+            logging.exception(
+                "get_sample_values: unexpected error on %s[%s]",
+                clean_table, clean_column
+            )
+            return []

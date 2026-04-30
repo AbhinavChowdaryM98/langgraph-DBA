@@ -222,7 +222,7 @@ ACCURACY RULES:
 - Always handle NULL in aggregations: use WHERE col IS NOT NULL when computing rates/ratios
 - For LIMIT queries, always include ORDER BY to get deterministic results
 - Never assume enum values — always check with get_sample_values first
-        """
+"""
     
     def get_connection_id(self) -> str:
         """Generate unique connection ID for SQLite database."""
@@ -242,38 +242,76 @@ ACCURACY RULES:
         return connection_id
 
     def get_sample_values(self, table_name: str, column_name: str, limit: int = 10) -> list:
-        """Get sample values from a specific column to understand data patterns."""
+        """Get distinct non-null sample values from a column.
+
+        Args:
+            table_name: Table to sample from.
+            column_name: Column to sample. Quotes are stripped and re-applied safely.
+            limit: Max distinct values to return (default 10).
+
+        Returns:
+            List of string-coerced values, empty list on any failure.
+
+        Raises:
+            Nothing — all exceptions are caught and logged.
+        """
+        clean_table = table_name.strip('"`[]')
+        clean_column = column_name.strip('"`[]')
+
         try:
-            conn = sqlite3.connect(self.DB_PATH)
-            cursor = conn.cursor()
+            with sqlite3.connect(self.DB_PATH) as conn:
+                conn.row_factory = None  # keep raw tuples
+                cursor = conn.cursor()
 
-            # First, get all columns in the table to help debug
-            cursor.execute(f"PRAGMA table_info(`{table_name}`)")
-            table_info = cursor.fetchall()
-            available_columns = [col[1] for col in table_info]
-            
-            # Strip quotes from column_name for comparison
-            clean_column_name = column_name.strip('"')
-            
-            # Check if column exists
-            if clean_column_name not in available_columns:
-                logging.error(f"Column '{column_name}' not found in table '{table_name}'. Available columns: {available_columns}")
-                cursor.close()
-                conn.close()
-                return []
+                # Validate table exists
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (clean_table,)
+                )
+                if cursor.fetchone() is None:
+                    logging.error(
+                        "get_sample_values: table '%s' not found in '%s'",
+                        clean_table, self.DB_PATH
+                    )
+                    return []
 
-            # Query to get distinct sample values
-            query = f"SELECT DISTINCT `{clean_column_name}` FROM `{table_name}` LIMIT {limit}"
-            cursor.execute(query)
-            result = cursor.fetchall()
+                # Validate column exists
+                cursor.execute(f'PRAGMA table_info("{clean_table}")')
+                available = [row[1] for row in cursor.fetchall()]
+                if clean_column not in available:
+                    logging.error(
+                        "get_sample_values: column '%s' not found in '%s'. Available: %s",
+                        clean_column, clean_table, available
+                    )
+                    return []
 
-            cursor.close()
-            conn.close()
+                # Safe parameterised-style query — identifiers can't be bound,
+                # but we've already validated both names above.
+                cursor.execute(
+                    f'SELECT DISTINCT "{clean_column}" '
+                    f'FROM "{clean_table}" '
+                    f'WHERE "{clean_column}" IS NOT NULL '
+                    f'LIMIT ?',
+                    (limit,)
+                )
+                rows = cursor.fetchall()
 
-            # Extract values and convert to strings
-            values = [str(row[0]) if row[0] is not None else "NULL" for row in result]
-            logging.info(f"Successfully retrieved {len(values)} sample values from {table_name}.{clean_column_name}")
+            values = [str(row[0]) for row in rows]
+            logging.debug(
+                "get_sample_values: %d values from %s.%s",
+                len(values), clean_table, clean_column
+            )
             return values
+
+        except sqlite3.OperationalError as e:
+            logging.error(
+                "get_sample_values: OperationalError on %s.%s — %s",
+                clean_table, clean_column, e
+            )
+            return []
         except Exception as e:
-            logging.error(f"Error getting sample values from {table_name}.{column_name}: {e}")
+            logging.exception(
+                "get_sample_values: unexpected error on %s.%s",
+                clean_table, clean_column
+            )
             return []

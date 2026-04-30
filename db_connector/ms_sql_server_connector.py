@@ -246,6 +246,54 @@ class SqlServerConnector:
         connection_id = f"{hashlib.md5(connection_string.encode()).hexdigest()[:12]}_{schema_hash}"
         return connection_id
 
+    def get_query_generation_instructions(self) -> str:
+        return """
+Generate standard T-SQL queries for Microsoft SQL Server. Follow these rules strictly:
+
+SYNTAX RULES:
+- Column and table names with spaces or reserved words: wrap in square brackets e.g. [Order Date], [User]
+- NO double quotes for identifiers — square brackets only
+- String concatenation: use + operator or CONCAT() — both supported
+- Boolean: SQL Server has no bool type, use BIT (1/0) or CASE WHEN expressions
+- Date functions: YEAR(), MONTH(), DAY(), DATEPART(), DATEDIFF(), DATEADD()
+- String functions: CHARINDEX() not INSTR(), SUBSTRING() not SUBSTR()
+- Use TOP(n) not LIMIT for row limiting: SELECT TOP(10) * FROM table
+- TOP requires ORDER BY for deterministic results: SELECT TOP(10) * FROM table ORDER BY col
+- ISNULL(col, default) or COALESCE(col, default) for NULL substitution
+- Use NULLIF(denominator, 0) to avoid division by zero
+- Window functions: use QUALIFY-equivalent via subquery or CTE with ROW_NUMBER()
+- CTEs: WITH cte_name AS (SELECT ...) SELECT * FROM cte_name
+- Semicolons optional but recommended before CTEs: ; WITH cte AS (...)
+
+ACCURACY RULES:
+- Column and table names are case-insensitive by default but match exact casing from schema for clarity
+- String comparisons are case-insensitive by default (depends on collation) — never assume
+- String filter values: verify exact values with get_sample_values before filtering
+- When dividing integers, cast explicitly: CAST(numerator AS FLOAT) / denominator or numerator * 1.0 / denominator
+- Always handle NULL in aggregations: use WHERE col IS NOT NULL when computing rates/ratios
+- For LIMIT (TOP) queries, always include ORDER BY to get deterministic results
+- Never assume enum values — always check with get_sample_values first
+- Schema-qualify table names when multiple schemas exist e.g. dbo.TableName
+- Always use schema prefix for system views: sys.tables, sys.columns, INFORMATION_SCHEMA.COLUMNS
+
+TYPE HANDLING:
+- Cast text to numeric: CAST(col AS INT), CAST(col AS DECIMAL(10,2)), TRY_CAST() for safe casting
+- Cast to date: CAST(col AS DATE), TRY_CAST(col AS DATE) for safe casting
+- TRY_CAST / TRY_CONVERT — prefer over CAST/CONVERT when input data quality is uncertain
+- Date literals: use unambiguous format 'YYYY-MM-DD' or CONVERT(DATE, 'DD/MM/YYYY', 103)
+- JSON columns: JSON_VALUE(col, '$.key') for scalar, JSON_QUERY(col, '$.array') for objects
+- XML columns: col.value('(/root/node)[1]', 'VARCHAR(100)') for extraction
+
+PAGINATION:
+- Use OFFSET/FETCH for pagination: ORDER BY col OFFSET 10 ROWS FETCH NEXT 10 ROWS ONLY
+- Never use TOP for pagination — use OFFSET/FETCH instead
+
+PERFORMANCE HINTS (include only when relevant):
+- NOLOCK hint for non-blocking reads: FROM table WITH (NOLOCK) — note dirty read risk
+- For large aggregations, consider OPTION (HASH GROUP) or OPTION (RECOMPILE) hints sparingly
+- Avoid SELECT * in production queries — always specify columns
+"""
+
     def get_sample_values(self, table_name: str, column_name: str, limit: int = 10) -> list:
         """Get sample values from a specific column to understand data patterns."""
         try:
